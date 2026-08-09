@@ -488,3 +488,7 @@ Tests use temporary Git repositories and fake SDK sessions. They do not require
 credentials, API calls, or paid tokens. The package intentionally excludes
 databases, distributed queues, remote worker fleets, dashboards, custom model
 provider layers, extra TUIs, and unbounded automatic retries.
+
+`dist/` is intentionally committed. Pi installs Git packages with development
+dependencies omitted, so installation consumes the prebuilt files and never
+needs a local `tsc`; `npm pack` rebuilds them through the `prepack` script.

@@ -2,6 +2,5 @@
 !.orchestrator/config.json
 .worktrees/
 node_modules/
-dist/
 coverage/
 *.tgz

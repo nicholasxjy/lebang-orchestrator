@@ -30,7 +30,7 @@
     "build": "tsc -p tsconfig.build.json && node scripts/make-cli-executable.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && vitest run",
-    "prepare": "npm run build"
+    "prepack": "npm run build"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

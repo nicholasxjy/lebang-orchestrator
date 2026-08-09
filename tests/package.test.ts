@@ -14,10 +14,11 @@ describe("Pi package", () => {
       bin: { orchestrator: "dist/cli.js" },
       pi: { extensions: ["dist/extension.js"], skills: ["skills"] },
       engines: { node: ">=22.19.0" },
-      scripts: { prepare: "npm run build" },
+      scripts: { prepack: "npm run build" },
       peerDependencies: { "@earendil-works/pi-coding-agent": "*" },
       devDependencies: { "@earendil-works/pi-coding-agent": "0.84.1" },
     });
+    expect(manifest.scripts).not.toHaveProperty("prepare");
   });
 
   it("registers only /orchestrator and no model-callable tool", () => {

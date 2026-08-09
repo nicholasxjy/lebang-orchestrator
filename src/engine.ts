@@ -8,7 +8,8 @@ import {
   type OrchestratorConfig,
 } from "./config.js";
 import { GitError, GitManager, isTestSupportPath } from "./git.js";
-import { HerdrAdapter, HerdrError } from "./herdr.js";
+import { HerdrAdapter, type HerdrTeam } from "./herdr.js";
+import { HerdrRunner } from "./herdr-runner.js";
 import {
   SchemaError,
   parseCoderResult,
@@ -47,6 +48,7 @@ export class OrchestratorEngine {
   readonly store: RunStore;
   readonly git: GitManager;
   readonly herdr: HerdrAdapter;
+  readonly herdrRunner: HerdrRunner | undefined;
   readonly runner: AgentRunner;
 
   constructor(
@@ -58,7 +60,20 @@ export class OrchestratorEngine {
     this.store = new RunStore(join(this.repoRoot, ".orchestrator"));
     this.git = new GitManager(this.repoRoot, join(this.repoRoot, ".worktrees"));
     this.herdr = new HerdrAdapter(config.herdr.enabled, config.herdr.command, this.repoRoot);
-    this.runner = runner ?? new PiRunner(this.repoRoot, this.store);
+    this.herdrRunner = config.herdr.enabled
+      ? new HerdrRunner(this.repoRoot, this.store, config, this.herdr)
+      : undefined;
+    this.runner = runner ?? this.herdrRunner ?? new PiRunner(this.repoRoot, this.store);
+  }
+
+  async initializeTeam(): Promise<HerdrTeam> {
+    if (!this.herdrRunner) throw new EngineError("init requires herdr.enabled=true");
+    return this.herdrRunner.initializeTeam();
+  }
+
+  async presentToPlanner(result: RunResult | Error): Promise<void> {
+    if (!this.herdrRunner) throw new EngineError("planner presentation requires Herdr");
+    await this.herdrRunner.presentToPlanner(result);
   }
 
   async planGoal(goal: string): Promise<Plan> {
@@ -69,7 +84,15 @@ export class OrchestratorEngine {
       agent: planner,
       taskId: "PLAN",
       cwd: this.repoRoot,
-      prompt: plannerPrompt(goal, baseCommit, this.repoRoot),
+      prompt: plannerPrompt(
+        goal,
+        baseCommit,
+        this.repoRoot,
+        Object.values(this.config.agents)
+          .filter((agent) => agent.role === "coder")
+          .map((agent) => agent.identity),
+        this.config.maxWorkers,
+      ),
       parser: parsePlan,
       stateTransition: "unplanned -> planned",
     });
@@ -77,6 +100,7 @@ export class OrchestratorEngine {
     if (result.baseCommit !== baseCommit) {
       throw new EngineError(`planner returned baseCommit ${result.baseCommit}, expected ${baseCommit}`);
     }
+    assignUnownedTasks(this.config, result.tasks);
     for (const task of result.tasks) {
       if (task.workerRole !== "coder") {
         throw new EngineError(
@@ -84,7 +108,7 @@ export class OrchestratorEngine {
         );
       }
       if (task.assignedAgent === null) {
-        task.assignedAgent = selectCoder(this.config, task, new Set()) ?? null;
+        throw new EngineError(`planned task ${task.id} has no available coder`);
       } else if (!this.config.agents[task.assignedAgent]) {
         throw new EngineError(`planned task ${task.id} references unknown agent ${task.assignedAgent}`);
       }
@@ -145,23 +169,6 @@ export class OrchestratorEngine {
       try {
         const worktree = await this.git.prepareTaskWorktree(task, plan.tasks, plan.baseCommit);
         this.store.saveTask(task);
-        try {
-          const metadata = await this.herdr.openTask(task);
-          if (metadata !== undefined) {
-            this.store.appendHistory(task.id, {
-              event: "herdr_workspace_opened",
-              agent: plannerIdentity,
-              metadata,
-            });
-          }
-        } catch (error) {
-          if (!(error instanceof HerdrError)) throw error;
-          this.store.appendHistory(task.id, {
-            event: "herdr_warning",
-            agent: plannerIdentity,
-            reason: error.message,
-          });
-        }
         transitionTask(this.store, task, "running", coder.identity, "coder execution started");
         const coderResult = await this.runCoder(plan, task, worktree, coder);
         await this.testAndReview(plan, task, worktree, coder, coderResult);
@@ -723,7 +730,15 @@ export class OrchestratorEngine {
       agent: planner,
       taskId: "PLAN",
       cwd: this.repoRoot,
-      prompt: replanPrompt(current, review, this.repoRoot),
+      prompt: replanPrompt(
+        current,
+        review,
+        this.repoRoot,
+        Object.values(this.config.agents)
+          .filter((agent) => agent.role === "coder")
+          .map((agent) => agent.identity),
+        this.config.maxWorkers,
+      ),
       parser: parsePlan,
       stateTransition: "replan_required -> running",
     });
@@ -734,12 +749,13 @@ export class OrchestratorEngine {
     if (replanned.goal !== current.goal) {
       throw new EngineError("replan changed the original user goal");
     }
+    assignUnownedTasks(this.config, replanned.tasks);
     for (const task of replanned.tasks) {
       if (task.workerRole !== "coder") {
         throw new EngineError(`replanned task ${task.id} uses unsupported workerRole ${task.workerRole}`);
       }
       if (task.assignedAgent === null && task.status !== "invalidated") {
-        task.assignedAgent = selectCoder(this.config, task, new Set()) ?? null;
+        throw new EngineError(`replanned task ${task.id} has no available coder`);
       }
       if (task.assignedAgent !== null) selectCoder(this.config, task, new Set());
     }
@@ -807,6 +823,23 @@ function sameSet(left: string[], right: string[]): boolean {
   const leftSet = new Set(left);
   const rightSet = new Set(right);
   return leftSet.size === rightSet.size && [...leftSet].every((item) => rightSet.has(item));
+}
+
+function assignUnownedTasks(config: OrchestratorConfig, tasks: Task[]): void {
+  const coders = Object.values(config.agents)
+    .filter((agent) => agent.role === "coder")
+    .sort((left, right) => {
+      if (left.identity === "kd") return -1;
+      if (right.identity === "kd") return 1;
+      return left.identity.localeCompare(right.identity);
+    })
+    .slice(0, config.maxWorkers);
+  let index = 0;
+  for (const task of tasks) {
+    if (task.assignedAgent !== null || task.status === "invalidated") continue;
+    task.assignedAgent = coders[index % coders.length]?.identity ?? null;
+    index += 1;
+  }
 }
 
 function errorMessage(error: unknown): string {

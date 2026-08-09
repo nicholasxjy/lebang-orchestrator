@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { createAgentSession, DefaultResourceLoader, getAgentDir, ModelRuntime, resolveCliModel, SessionManager, } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, getAgentDir, ModelRuntime, resolveCliModel, SessionManager, SettingsManager, } from "@earendil-works/pi-coding-agent";
 import { resolveSkillPath } from "./config.js";
 import { formatJson } from "./json.js";
 import { SchemaError, } from "./models.js";
@@ -10,7 +10,7 @@ export class AgentRunError extends Error {
     name = "AgentRunError";
 }
 export const RoleTools = {
-    planner: ["read", "grep", "find", "ls", "bash"],
+    planner: ["read", "grep", "find", "ls"],
     coder: ["read", "grep", "find", "ls", "bash", "edit", "write"],
     tester: ["read", "grep", "find", "ls", "bash", "edit", "write"],
     reviewer: ["read", "grep", "find", "ls", "bash"],
@@ -37,16 +37,20 @@ export const defaultPiSdk = {
         const sessionManager = SessionManager.create(request.cwd, request.sessionDir);
         sessionManager.appendSessionInfo(request.name);
         const resourceLoader = await createRoleResourceLoader(request.cwd, request.skillPath);
+        const settingsManager = SettingsManager.inMemory({
+            retry: { enabled: false },
+        });
+        const thinkingLevel = resolved.thinkingLevel ??
+            (request.role === "planner" ? "low" : undefined);
         const { session } = await createAgentSession({
             cwd: request.cwd,
             modelRuntime,
             model: resolved.model,
-            ...(resolved.thinkingLevel === undefined
-                ? {}
-                : { thinkingLevel: resolved.thinkingLevel }),
+            ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
             tools: [...request.tools],
             resourceLoader,
             sessionManager,
+            settingsManager,
         });
         return session;
     },
@@ -68,7 +72,31 @@ export class PiRunner {
         const startTime = utcNow();
         const sessionDir = join(this.store.runsDir, request.taskId, request.agent.role, "sessions");
         mkdirSync(sessionDir, { recursive: true });
-        const events = [];
+        mkdirSync(this.store.logsDir, { recursive: true });
+        const logPath = join(this.store.logsDir, `${request.taskId}-${request.agent.identity}-${runId}.log`);
+        const logDescriptor = openSync(logPath, "w", 0o600);
+        let logBuffer = "--- events ---\n";
+        let logFailure;
+        let finalEvent;
+        const flushLog = () => {
+            if (!logBuffer || logFailure !== undefined)
+                return;
+            const content = logBuffer;
+            logBuffer = "";
+            try {
+                writeSync(logDescriptor, content);
+            }
+            catch (error) {
+                logFailure = errorMessage(error);
+            }
+        };
+        const appendLog = (content) => {
+            if (logFailure !== undefined)
+                return;
+            logBuffer += content;
+            if (logBuffer.length >= 64 * 1024)
+                flushLog();
+        };
         let stderr = "";
         let exitCode = 0;
         let session;
@@ -89,9 +117,19 @@ export class PiRunner {
                 tools: RoleTools[request.agent.role],
                 skillPath,
                 model: request.agent.model,
+                role: request.agent.role,
                 runtime,
             });
-            unsubscribe = session.subscribe((event) => events.push(event));
+            unsubscribe = session.subscribe((event) => {
+                const serialized = serializeEvent(event);
+                appendLog(`${serialized}\n`);
+                if (event !== null &&
+                    typeof event === "object" &&
+                    !Array.isArray(event) &&
+                    event.type === "message_end") {
+                    finalEvent = serialized;
+                }
+            });
             const timeout = new Promise((_resolve, reject) => {
                 timer = setTimeout(() => {
                     timedOut = true;
@@ -116,8 +154,13 @@ export class PiRunner {
                 clearTimeout(timer);
             unsubscribe?.();
             session?.dispose();
+            flushLog();
         }
-        const stdout = events.map(serializeEvent).join("\n") + (events.length ? "\n" : "");
+        if (logFailure !== undefined) {
+            exitCode = 1;
+            stderr = `cannot persist SDK event log: ${logFailure}`;
+        }
+        const stdout = finalEvent === undefined ? "" : `${finalEvent}\n`;
         let result;
         let parseError;
         if (exitCode === 0) {
@@ -149,8 +192,20 @@ export class PiRunner {
             structuredResult: structured,
             stateTransition: request.stateTransition ?? null,
         };
+        appendLog(formatLog(record));
+        flushLog();
+        try {
+            closeSync(logDescriptor);
+        }
+        catch (error) {
+            logFailure ??= errorMessage(error);
+        }
+        if (logFailure !== undefined && exitCode === 0) {
+            exitCode = 1;
+            record.exitCode = 1;
+            record.stderr = `cannot persist SDK event log: ${logFailure}`;
+        }
         const recordPath = this.store.writeResult(request.taskId, request.agent.role, runId, record);
-        const logPath = this.store.writeLog(`${request.taskId}-${request.agent.identity}-${runId}.log`, formatLog(record));
         const artifact = { runId, recordPath, logPath };
         if (exitCode !== 0) {
             throw new AgentRunError(`Pi SDK run exited with ${exitCode}; run record: ${recordPath}`);

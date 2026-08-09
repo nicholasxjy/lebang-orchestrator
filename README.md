@@ -1,8 +1,8 @@
 # lebang-orchestrator
 
 `lebang-orchestrator` is a small, observable Pi package for coordinating coding
-agents through role Skills, Git worktrees, filesystem state, and optional Herdr
-workspaces.
+agents through visible Herdr panes, role Skills, Git worktrees, and filesystem
+state.
 
 It implements this lifecycle:
 
@@ -11,16 +11,18 @@ PLAN -> IMPLEMENT -> SELF_VERIFY -> INDEPENDENT_TEST -> REVIEW
      -> REWORK / REPLAN -> INTEGRATE -> FINAL_VALIDATE -> COMPLETE
 ```
 
-Agents run through the `@earendil-works/pi-coding-agent` SDK in-process. The
-orchestrator never starts a `pi` subprocess. Git commits and worktrees isolate
-production tasks, while `.orchestrator/` remains the resumable source of truth.
+With Herdr enabled, the orchestrator starts each configured Pi agent in a named
+pane, submits role-scoped work through `herdr agent prompt`, and reads the
+structured result from that pane. Git commits and worktrees isolate production
+tasks, while `.orchestrator/` remains the resumable source of truth. The existing
+in-process SDK runner remains available when Herdr is explicitly disabled.
 
 ## Requirements
 
 - Node.js 22.19 or newer
 - Git
 - Pi `0.84.1` with a configured provider
-- Herdr 0.8+ only when enabled in `.orchestrator/config.json`
+- Herdr with `agent start`, `agent prompt`, and `pane split` support
 
 ## Install
 
@@ -88,23 +90,36 @@ The package contains a default `.orchestrator/config.json`. A target repository
 can override it by creating its own `.orchestrator/config.json`; an explicit
 `--config` path takes precedence over both.
 
-## Quick start: standalone CLI
+## Quick start: Herdr team
 
-Run these commands from the target repository:
+Run this command from a Herdr-managed pane in the target repository:
 
 ```bash
-# 1. Ask lebang to inspect the repository and create a task DAG.
+orchestrator init "Add request retry support with tests and documentation"
+```
+
+`init` creates a dedicated tab with visible named panes for `lebang`,
+`westbrook`, `curry`, `duncan`, and up to `maxWorkers` coders. Every pane starts
+the configured Pi model and role Skill. `lebang` writes the plan, the
+orchestrator dispatches each lifecycle handoff through Herdr, and the final
+status is presented in and focused back to the `lebang` pane. A coder selected
+later by the plan is started lazily.
+
+The stepwise commands remain available for inspection and recovery:
+
+```bash
+# Ask lebang to create only the persisted task DAG.
 orchestrator plan "Add request retry support with tests and documentation"
 
-# 2. Inspect the generated plan before any coder starts.
+# Inspect the generated plan before any coder starts.
 orchestrator graph
 orchestrator status
 orchestrator task T1
 
-# 3. Run ready tasks through coding, testing, review, and integration.
+# Run ready tasks through coding, testing, review, and integration.
 orchestrator run
 
-# 4. Confirm the persisted final state.
+# Confirm the persisted final state.
 orchestrator status
 ```
 
@@ -141,6 +156,12 @@ pi
 ```
 
 Then enter:
+
+```text
+/orchestrator init "Replace callback-based loading with async/await and preserve behavior"
+```
+
+Or use the stepwise interface:
 
 ```text
 /orchestrator plan "Replace callback-based loading with async/await and preserve behavior"
@@ -226,7 +247,8 @@ owner are never run concurrently.
 ## Command reference
 
 | Command | Behavior | Model call |
-|---|---|---|
+| --- | --- | --- |
+| `init <goal>` | Starts the visible Herdr team, plans the goal, runs the full lifecycle, and returns focus to lebang. | Yes |
 | `plan <goal>` | Inspects the repository, creates and persists a validated DAG. Fails if a plan already exists. | Yes |
 | `run` | Runs ready tasks and automatically integrates after every active task is approved. | Yes |
 | `status` | Prints run state, task owners, branches, dependencies, review counts, and the latest blocker. | No |
@@ -236,7 +258,7 @@ owner are never run concurrently.
 | `integrate` | Integrates all approved tasks and runs final validation. Normally invoked automatically by `run`. | Yes |
 | `resume` | Recovers interrupted task or integration state from persisted evidence, then continues the run. | Usually |
 | `graph` | Prints the current DAG as Graphviz DOT. | No |
-| `logs <id>` | Prints all preserved SDK run logs for one task. | No |
+| `logs <id>` | Prints all preserved agent run logs for one task. | No |
 
 All commands accept the global options before the command:
 
@@ -258,7 +280,7 @@ in your Pi installation:
 {
   "agents": {
     "lebang": {
-      "model": "openai-codex/gpt-5.4-mini:high",
+      "model": "openai-codex/gpt-5.4-mini:low",
       "role": "planner",
       "skill": "planner"
     },
@@ -285,7 +307,7 @@ in your Pi installation:
   },
   "herdr": {
     "command": "herdr",
-    "enabled": false
+    "enabled": true
   },
   "maxReviewAttempts": 3,
   "maxWorkers": 2,
@@ -305,19 +327,22 @@ Configuration rules that matter in practice:
 - `maxWorkers` limits a deterministic ready-task batch; the same owner is still
   limited to one task at a time.
 - `maxReviewAttempts` stops automatic review/rework loops at a finite boundary.
-- A model can include a Pi thinking suffix such as `:high` or `:xhigh`.
+- A model can include a Pi thinking suffix such as `:high` or `:xhigh`; planners
+  default to `:low` when omitted.
+- SDK fallback auto-retries are disabled so failures persist immediately; use
+  `retry` or `resume` for an explicit retry.
 - `validationCommands` must contain at least one non-empty argument array. Each
   command runs in the isolated integration worktree without implicit shell
   parsing.
-- Set `herdr.enabled` to `true` to open task worktrees in Herdr. Herdr failures
-  are recorded as warnings and do not replace filesystem state as the source of
-  truth.
+- `herdr.enabled=true` makes visible pane agents the execution path and requires
+  the command to run inside Herdr. Set it to `false` only for the in-process SDK
+  fallback; `init` is unavailable in that mode.
 
 Configure agent identities, roles, role Skills, models, concurrency, review
 limits, Herdr, and final validation commands in `.orchestrator/config.json`.
 Models belong only in configuration; Skills never select models. The legacy
 `piCommand` field is still accepted when reading Python-era configuration, but
-it is ignored because execution now uses the SDK.
+it is ignored because Herdr starts the supported `pi` agent kind directly.
 
 ## Inspecting and accepting the result
 
@@ -408,7 +433,7 @@ Common errors and their meaning:
   fixtures, mocks, or other recognized test-support files.
 - `integration requires every task to be approved`: inspect `status`; more task
   work or recovery is required before integration.
-- `no logs found`: no SDK run has been persisted for that task yet, or the task
+- `no logs found`: no agent run has been persisted for that task yet, or the task
   id is incorrect.
 
 Only one persisted plan is active per target repository. Before starting an
@@ -449,11 +474,11 @@ approved, `duncan` integrates task commits on an isolated
 `orchestrator/<run>/integration` branch. The user's current branch is not
 modified.
 
-Each SDK run uses an independent persisted Pi session, the task worktree as its
-cwd, the configured model/thinking suffix, a strict role tool allowlist, and
-only the current role Skill. Extension discovery is disabled in child sessions
-to prevent recursive loading, while target-repository `AGENTS.md` context is
-preserved.
+Each visible pane uses the configured model/thinking suffix, a strict role tool
+allowlist, and only the current role Skill. Extension discovery is disabled in
+child sessions to prevent recursive loading. Role prompts carry the task
+worktree explicitly, and Herdr keeps the agent conversation visible while the
+orchestrator persists the structured handoff.
 
 ## Persistence and recovery
 
@@ -475,9 +500,10 @@ Runtime data stays plain and inspectable:
   <run>-<integrator>/
 ```
 
-Every SDK run records identity, role, model, cwd, timestamps, exit code, JSONL
-events, stderr, and the parsed structured result. JSON state writes are atomic,
-history appends are fsynced, and task locks remove stale PIDs before recovery.
+Every agent run records identity, role, model, cwd, timestamps, exit code,
+Herdr transcript or SDK events, stderr, and the parsed structured result. JSON
+state writes are atomic, history appends are fsynced, and task locks remove
+stale PIDs before recovery.
 
 The camelCase state format is compatible with the previous Python release.
 `orchestrator resume` and `orchestrator retry` can continue existing
@@ -496,8 +522,8 @@ npm run build
 npm pack --dry-run
 ```
 
-Tests use temporary Git repositories and fake SDK sessions. They do not require
-credentials, API calls, or paid tokens. The package intentionally excludes
+Tests use temporary Git repositories, fake Herdr command responses, and fake SDK
+sessions. They do not require credentials, API calls, or paid tokens. The package intentionally excludes
 databases, distributed queues, remote worker fleets, dashboards, custom model
 provider layers, extra TUIs, and unbounded automatic retries.
 

@@ -7,11 +7,12 @@ import { SchemaError } from "./models.js";
 import { RunStore, StoreError } from "./persistence.js";
 import { runProcess } from "./process.js";
 const commands = new Set([
-    "plan", "run", "status", "task", "retry", "review", "integrate", "resume", "graph", "logs",
+    "init", "plan", "run", "status", "task", "retry", "review", "integrate", "resume", "graph", "logs",
 ]);
 export const helpText = `usage: orchestrator [--repo PATH] [--config PATH] COMMAND [ARG]
 
 commands:
+  init GOAL    start the Herdr team and run a goal from planner to completion
   plan GOAL    plan a user goal through lebang
   run          run ready tasks through the full lifecycle
   status       show persisted orchestration status
@@ -21,7 +22,7 @@ commands:
   integrate    integrate approved task commits
   resume       recover interrupted orchestration state
   graph        print the task DAG in DOT format
-  logs ID      print preserved Pi logs for a task
+  logs ID      print preserved agent logs for a task
 `;
 export async function executeCommand(argv, options = {}) {
     const io = options.io ?? {
@@ -63,6 +64,20 @@ export async function executeCommand(argv, options = {}) {
         const engine = new OrchestratorEngine(repo, loadConfig(configPath));
         let value;
         switch (parsed.command) {
+            case "init": {
+                const team = await engine.initializeTeam();
+                try {
+                    const plan = await engine.planGoal(parsed.values[0]);
+                    const result = await engine.run();
+                    await engine.presentToPlanner(result);
+                    value = { status: result.status, team, plan, result };
+                }
+                catch (error) {
+                    await engine.presentToPlanner(error instanceof Error ? error : new Error(String(error))).catch(() => undefined);
+                    throw error;
+                }
+                break;
+            }
             case "plan":
                 value = await engine.planGoal(parsed.values[0]);
                 break;
@@ -125,10 +140,10 @@ function parseArguments(argv) {
     return parsed;
 }
 function validateCommandValues(command, values) {
-    const needsOne = new Set(["plan", "task", "retry", "review", "logs"]);
+    const needsOne = new Set(["init", "plan", "task", "retry", "review", "logs"]);
     const expected = needsOne.has(command) ? 1 : 0;
     if (values.length !== expected) {
-        const label = command === "plan" ? "goal" : "argument";
+        const label = command === "plan" || command === "init" ? "goal" : "argument";
         throw new EngineError(`${command} requires ${expected === 1 ? `exactly one ${label}` : "no arguments"}`);
     }
 }

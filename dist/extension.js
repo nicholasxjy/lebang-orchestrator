@@ -2,10 +2,11 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { executeCommand } from "./commands.js";
 const statusKey = "lebang-orchestrator";
-const progressCommands = new Set(["run", "retry", "review", "integrate", "resume"]);
+const progressCommands = new Set(["init", "run", "retry", "review", "integrate", "resume"]);
 const longCommands = new Set(["plan", ...progressCommands]);
 const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const commandSuggestions = [
+    ["init", "Start the Herdr team and run a goal"],
     ["plan", "Create a task DAG for a goal"],
     ["run", "Run ready tasks through integration"],
     ["status", "Show persisted orchestration status"],
@@ -142,6 +143,7 @@ export function classifyOutcome(exitCode, command, stdout, stderr) {
 }
 function actionFor(command) {
     return {
+        init: "Starting Herdr team and running goal",
         plan: "Planning task DAG",
         run: "Running task lifecycle",
         status: "Loading status",
@@ -156,6 +158,7 @@ function actionFor(command) {
 }
 function completionLabel(command) {
     return {
+        init: "Initialization",
         plan: "Plan",
         run: "Run",
         status: "Status",
@@ -171,6 +174,7 @@ function completionLabel(command) {
 }
 function successMessage(command) {
     return {
+        init: "Goal completed in Herdr",
         plan: "Plan created",
         run: "Run completed",
         status: "Status loaded",

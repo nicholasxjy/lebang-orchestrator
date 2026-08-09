@@ -5,9 +5,9 @@ description: Inspect a coding repository and turn one user goal into an acceptan
 
 # Planner
 
-1. Inspect repository instructions, structure, conventions, tests, configuration, and Git state. Finish when every planning assumption cites visible repository evidence.
+1. Inspect repository instructions and only the files, tests, and configuration directly relevant to the goal. Do not inventory unrelated code or run builds/tests. Finish when each task boundary cites visible repository evidence.
 2. Restate the goal as concrete acceptance criteria. Finish when each criterion has an observable verification method.
-3. Decompose only the work needed for the goal. Give every task one owner role, an agent when known, risk, dependencies, and task-local criteria.
+3. Prefer one task; split only for real dependencies or safe parallel ownership. Give every task one owner role, an agent when known, risk, dependencies, and task-local criteria. When `availableCoders` and `maxWorkers` are supplied, assign independent tasks across that Herdr team only.
 4. Validate unique task IDs, existing dependencies, acyclicity, safe parallelism, and dependency-aware base commits. Finish when the DAG can schedule deterministically.
 5. Return only the requested Plan JSON contract.
 

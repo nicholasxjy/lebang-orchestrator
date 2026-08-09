@@ -70,6 +70,13 @@ export function parseConfig(value: unknown): OrchestratorConfig {
   if (Object.keys(agents).length === 0) {
     throw new SchemaError("agents must be a non-empty object");
   }
+  for (const identity of Object.keys(agents)) {
+    if (!/^[a-z][a-z0-9_-]{0,31}$/.test(identity)) {
+      throw new SchemaError(
+        `agent identity ${identity} must match [a-z][a-z0-9_-]{0,31} for Herdr`,
+      );
+    }
+  }
   return {
     maxWorkers: raw.maxWorkers,
     maxReviewAttempts: raw.maxReviewAttempts,

@@ -1,6 +1,7 @@
 import { type OrchestratorConfig } from "./config.js";
 import { GitError, GitManager } from "./git.js";
-import { HerdrAdapter } from "./herdr.js";
+import { HerdrAdapter, type HerdrTeam } from "./herdr.js";
+import { HerdrRunner } from "./herdr-runner.js";
 import { SchemaError, type Plan, type RunResult, type Task } from "./models.js";
 import { RunStore, StoreError } from "./persistence.js";
 import { AgentRunError, type AgentRunner } from "./runner.js";
@@ -13,8 +14,11 @@ export declare class OrchestratorEngine {
     readonly store: RunStore;
     readonly git: GitManager;
     readonly herdr: HerdrAdapter;
+    readonly herdrRunner: HerdrRunner | undefined;
     readonly runner: AgentRunner;
     constructor(repoRoot: string, config: OrchestratorConfig, runner?: AgentRunner);
+    initializeTeam(): Promise<HerdrTeam>;
+    presentToPlanner(result: RunResult | Error): Promise<void>;
     planGoal(goal: string): Promise<Plan>;
     run(): Promise<RunResult>;
     private executeTask;

@@ -48,6 +48,16 @@ describe("configuration", () => {
     })).toThrow(/validationCommands|validation/);
   });
 
+  it("rejects agent identities Herdr cannot name", () => {
+    expect(() => parseConfig({
+      maxWorkers: 1,
+      maxReviewAttempts: 1,
+      validationCommands: [["npm", "test"]],
+      herdr: { enabled: true, command: "herdr" },
+      agents: { "Bad Agent": { role: "coder", skill: "coder", model: "example/model" } },
+    })).toThrow(/must match.*Herdr/);
+  });
+
   it("falls back to installed package skills", () => {
     const root = resolveSkillsRoot("/tmp/repository-without-skills");
     expect(existsSync(join(root, "planner", "SKILL.md"))).toBe(true);

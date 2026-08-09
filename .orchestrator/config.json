@@ -41,7 +41,7 @@
       "skill": "coder"
     },
     "lebang": {
-      "model": "openai-codex/gpt-5.4-mini",
+      "model": "openai-codex/gpt-5.4-mini:low",
       "role": "planner",
       "skill": "planner"
     },
@@ -68,7 +68,7 @@
   },
   "herdr": {
     "command": "herdr",
-    "enabled": false
+    "enabled": true
   },
   "maxReviewAttempts": 3,
   "maxWorkers": 3,

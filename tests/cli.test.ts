@@ -1,4 +1,4 @@
-import { rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
@@ -9,7 +9,7 @@ import orchestratorExtension, {
   taskProgress,
 } from "../src/extension.js";
 import { RunStore } from "../src/persistence.js";
-import { makeTask, temporaryDirectory } from "./helpers.js";
+import { createRepository, makeTask, temporaryDirectory } from "./helpers.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -30,6 +30,31 @@ function capture(): { io: CommandIo; stdout(): string; stderr(): string } {
 }
 
 describe("command service", () => {
+  it("exposes init and requires Herdr mode", async () => {
+    const parent = temporaryDirectory(); roots.push(parent);
+    const { root } = createRepository(join(parent, "repo"));
+    mkdirSync(join(root, ".orchestrator"), { recursive: true });
+    writeFileSync(join(root, ".orchestrator", "config.json"), JSON.stringify({
+      maxWorkers: 1,
+      maxReviewAttempts: 1,
+      validationCommands: [["npm", "test"]],
+      herdr: { enabled: false, command: "herdr" },
+      agents: {
+        lebang: { role: "planner", skill: "planner", model: "example/planner" },
+        kd: { role: "coder", skill: "coder", model: "example/coder" },
+        westbrook: { role: "tester", skill: "tester", model: "example/tester" },
+        curry: { role: "reviewer", skill: "reviewer", model: "example/reviewer" },
+        duncan: { role: "integrator", skill: "integrator", model: "example/integrator" },
+      },
+    }));
+    const help = capture();
+    expect(await executeCommand(["--help"], { io: help.io })).toBe(0);
+    expect(help.stdout()).toContain("init GOAL");
+    const output = capture();
+    expect(await executeCommand(["--repo", root, "init", "Goal"], { io: output.io })).toBe(2);
+    expect(output.stderr()).toContain("init requires herdr.enabled=true");
+  });
+
   it("summarizes persisted task states", async () => {
     const repo = temporaryDirectory(); roots.push(repo);
     new RunStore(join(repo, ".orchestrator")).initialize({
@@ -156,6 +181,9 @@ describe("command service", () => {
     });
     expect(classifyOutcome(0, "run", '{"status":"blocked"}', "")).toMatchObject({
       symbol: "!", notification: "warning", message: "Run blocked",
+    });
+    expect(classifyOutcome(0, "init", '{"status":"blocked"}', "")).toMatchObject({
+      symbol: "!", notification: "warning", message: "Initialization blocked",
     });
     expect(classifyOutcome(2, "plan", "", "orchestrator: bad config\n")).toMatchObject({
       symbol: "✗", notification: "error", message: "Plan failed — bad config",

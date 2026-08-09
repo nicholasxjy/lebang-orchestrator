@@ -6,7 +6,7 @@ export declare class AgentRunError extends Error {
     readonly name = "AgentRunError";
 }
 export declare const RoleTools: {
-    readonly planner: readonly ["read", "grep", "find", "ls", "bash"];
+    readonly planner: readonly ["read", "grep", "find", "ls"];
     readonly coder: readonly ["read", "grep", "find", "ls", "bash", "edit", "write"];
     readonly tester: readonly ["read", "grep", "find", "ls", "bash", "edit", "write"];
     readonly reviewer: readonly ["read", "grep", "find", "ls", "bash"];
@@ -41,6 +41,7 @@ export interface SdkSessionRequest {
     tools: readonly string[];
     skillPath: string;
     model: string;
+    role: AgentConfig["role"];
     runtime: unknown;
 }
 export interface PiSdkAdapter {

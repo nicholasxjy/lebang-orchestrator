@@ -1,7 +1,7 @@
 function context(title, value) {
     return `${title}\n${JSON.stringify(value, null, 2)}`;
 }
-export function plannerPrompt(goal, baseCommit, repoRoot) {
+export function plannerPrompt(goal, baseCommit, repoRoot, availableCoders, maxWorkers) {
     const taskShape = {
         id: "T1",
         title: "...",
@@ -23,8 +23,13 @@ export function plannerPrompt(goal, baseCommit, repoRoot) {
         goal,
         repository: repoRoot,
         baseCommit,
+        availableCoders,
+        maxWorkers,
         requirements: [
+            "Inspect only instructions and files/tests directly relevant to this goal; do not inventory unrelated code or run builds.",
+            "Prefer one task; split only for real dependencies or safe parallel ownership.",
             "Create a valid acyclic task DAG.",
+            "Assign independent tasks to different availableCoders up to maxWorkers; use null only when the orchestrator should choose the default coder.",
             "Use coder-owned tasks; tester, reviewer, and integrator are lifecycle gates.",
             "Give every task observable acceptance criteria and preserve the supplied baseCommit.",
         ],
@@ -110,11 +115,13 @@ export function integratorPrompt(goal, plan, integratedCommits, validations, int
         },
     });
 }
-export function replanPrompt(plan, review, repoRoot) {
+export function replanPrompt(plan, review, repoRoot, availableCoders, maxWorkers) {
     return context("Replan the DAG and return exactly one complete Plan JSON object. Do not implement. Context:", {
         repository: repoRoot,
         currentPlan: plan,
         reviewResult: review,
+        availableCoders,
+        maxWorkers,
         rules: [
             "Preserve approved or completed task evidence unchanged.",
             "Mark superseded tasks invalidated and include replacement tasks explicitly.",

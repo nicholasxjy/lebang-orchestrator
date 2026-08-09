@@ -127,6 +127,21 @@ class ConcurrentRunner extends ApprovedRunner {
   }
 }
 
+class UnassignedPlanRunner extends ApprovedRunner {
+  override async run<T>(request: AgentRunRequest<T>): Promise<RunTuple<T>> {
+    if (request.agent.role !== "planner") return super.run(request);
+    return this.value(request, {
+      goal: "Route work",
+      baseCommit: this.baseCommit,
+      tasks: [
+        makeTask({ id: "T1", assignedAgent: null }),
+        makeTask({ id: "T2", assignedAgent: null }),
+        makeTask({ id: "T3", assignedAgent: null }),
+      ],
+    });
+  }
+}
+
 class TestReworkRunner extends ApprovedRunner {
   coderCount = 0;
   testerCount = 0;
@@ -319,6 +334,16 @@ describe("engine lifecycle", () => {
     const engine = new OrchestratorEngine(root, config, new ConcurrentRunner(baseCommit));
     await engine.planGoal("Parallel work");
     expect((await engine.run()).status).toBe("completed");
+  });
+
+  it("routes unassigned tasks across the configured Herdr coder capacity", async () => {
+    const parent = temporaryDirectory(); roots.push(parent);
+    const { root, baseCommit } = createRepository(join(parent, "repo"));
+    const config = testConfig({ maxWorkers: 2 });
+    config.agents.harden = { ...config.agents.kd!, identity: "harden" };
+    const engine = new OrchestratorEngine(root, config, new UnassignedPlanRunner(baseCommit));
+    const plan = await engine.planGoal("Route work");
+    expect(plan.tasks.map((task) => task.assignedAgent)).toEqual(["kd", "harden", "kd"]);
   });
 
   it("returns test-only review issues to westbrook without rerunning the coder", async () => {

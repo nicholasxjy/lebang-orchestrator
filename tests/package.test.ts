@@ -24,13 +24,23 @@ describe("Pi package", () => {
   it("registers only /orchestrator and no model-callable tool", () => {
     const commands: string[] = [];
     let tools = 0;
+    let completions: ((prefix: string) => Array<{ value: string }> | null) | undefined;
     const pi = {
-      registerCommand(name: string) { commands.push(name); },
+      registerCommand(
+        name: string,
+        options: { getArgumentCompletions?: typeof completions },
+      ) {
+        commands.push(name);
+        completions = options.getArgumentCompletions;
+      },
       registerTool() { tools += 1; },
     } as unknown as ExtensionAPI;
     orchestratorExtension(pi);
     expect(commands).toEqual(["orchestrator"]);
     expect(tools).toBe(0);
+    expect(completions!("re")?.map((item) => item.value)).toEqual([
+      "retry", "review", "resume",
+    ]);
   });
 
   it("loads the built extension in Pi offline without a paid model call", () => {

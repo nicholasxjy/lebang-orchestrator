@@ -155,6 +155,18 @@ the same command service and produces the same output as the standalone CLI.
 The output is displayed in the transcript but does not start an extra assistant
 turn.
 
+Pi acknowledges the command immediately with a loading row that shows the
+current action and elapsed time. Lifecycle commands also display a progress bar
+derived from the persisted task DAG, for example:
+
+```text
+⠸ Orchestrator · Running task lifecycle · [█████░░░░░] 2/4 tasks · T3 testing · 42s
+```
+
+The loading row is removed when the command ends. A notification then reports
+whether it completed, became blocked, or failed; the full JSON, status table, or
+error remains in the transcript as the durable result.
+
 ## Demo: orchestrate another repository
 
 Use `--repo` when the shell or Pi cwd is not the repository you want to change:

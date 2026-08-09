@@ -1,0 +1,4 @@
+interface:
+  display_name: "Integrator"
+  short_description: "Integrate approved commits and validate the goal"
+  default_prompt: "Use $integrator to integrate approved commits and validate the repository."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Reviewer"
+  short_description: "Gate work against criteria, diffs, and tests"
+  default_prompt: "Use $reviewer to issue a structured decision for this task."

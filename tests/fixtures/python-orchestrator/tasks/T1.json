@@ -1,0 +1,19 @@
+{
+  "acceptanceCriteria": [
+    "State remains compatible"
+  ],
+  "assignedAgent": "kd",
+  "baseCommit": null,
+  "branch": null,
+  "commit": null,
+  "dependencies": [],
+  "description": "Read and continue the persisted task.",
+  "id": "T1",
+  "reviewAttempts": 0,
+  "risk": "low",
+  "status": "pending",
+  "title": "Continue state",
+  "type": "implementation",
+  "workerRole": "coder",
+  "worktree": null
+}

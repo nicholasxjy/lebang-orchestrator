@@ -90,6 +90,17 @@ describe("command service", () => {
     expect(output.stdout()).toContain("pending=1");
   });
 
+  it("explains that run requires a successful plan", async () => {
+    const parent = temporaryDirectory(); roots.push(parent);
+    const { root } = createRepository(join(parent, "repo"));
+    expect(await executeCommand(["--repo", root, "init"], { io: capture().io })).toBe(0);
+    const output = capture();
+
+    expect(await executeCommand(["--repo", root, "run"], { io: output.io })).toBe(2);
+    expect(output.stderr()).toContain("no persisted plan; run plan GOAL first");
+    expect(output.stderr()).not.toContain("ENOENT");
+  });
+
   it("shows the latest blocker reason", async () => {
     const repo = temporaryDirectory(); roots.push(repo);
     const store = new RunStore(join(repo, ".orchestrator"));

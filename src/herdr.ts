@@ -1,9 +1,13 @@
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentConfig } from "./config.js";
 import type { ProcessOptions, ProcessResult } from "./process.js";
 import { runProcess } from "./process.js";
 
 const agentPaneReadyAttempts = 40;
 const agentPaneReadyDelayMs = 250;
+const sessionFlushAttempts = 20;
+const sessionFlushDelayMs = 100;
 
 export class HerdrError extends Error {
   override readonly name = "HerdrError";
@@ -65,6 +69,13 @@ export class HerdrAdapter {
       timeoutMs + 5_000,
       `prompt ${spec.agent.identity}`,
     );
+    if (existsSync(spec.sessionDir)) {
+      for (let attempt = 1; attempt <= sessionFlushAttempts; attempt += 1) {
+        const transcript = sessionTranscript(spec.sessionDir, marker);
+        if (transcript !== undefined) return transcript;
+        if (attempt < sessionFlushAttempts) await delay(sessionFlushDelayMs);
+      }
+    }
     const read = await this.run(
       [
         this.command,
@@ -207,6 +218,69 @@ export class HerdrAdapter {
     }
     return result;
   }
+}
+
+function sessionTranscript(sessionDir: string, marker: string): string | undefined {
+  const begin = `${marker}_BEGIN`;
+  const end = `${marker}_END`;
+  let paths: string[];
+  try {
+    paths = readdirSync(sessionDir)
+      .filter((name) => name.endsWith(".jsonl"))
+      .map((name) => join(sessionDir, name))
+      .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
+  } catch {
+    return undefined;
+  }
+  for (const path of paths) {
+    const texts: string[] = [];
+    let content: string;
+    try {
+      content = readFileSync(path, "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of content.split(/\r?\n/)) {
+      if (!line) continue;
+      try {
+        const entry = JSON.parse(line) as {
+          type?: unknown;
+          message?: { role?: unknown; content?: unknown };
+        };
+        if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
+        if (typeof entry.message.content === "string") {
+          texts.push(entry.message.content);
+          continue;
+        }
+        if (!Array.isArray(entry.message.content)) continue;
+        for (const block of entry.message.content) {
+          if (
+            block !== null &&
+            typeof block === "object" &&
+            (block as { type?: unknown }).type === "text" &&
+            typeof (block as { text?: unknown }).text === "string"
+          ) {
+            texts.push((block as { text: string }).text);
+          }
+        }
+      } catch {
+        // A partially flushed JSONL line will be retried after the agent settles.
+      }
+    }
+    const transcript = texts.join("\n");
+    if (transcript.includes(begin) && transcript.includes(end)) return transcript;
+    const beginIndex = transcript.lastIndexOf(begin);
+    if (beginIndex !== -1) {
+      const candidate = transcript.slice(beginIndex + begin.length).trim();
+      try {
+        JSON.parse(candidate);
+        return `${transcript.trimEnd()}\n${end}`;
+      } catch {
+        // The result is incomplete or has trailing text; wait for a marked result.
+      }
+    }
+  }
+  return undefined;
 }
 
 function responseErrorCode(result: ProcessResult): string | undefined {

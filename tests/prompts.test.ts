@@ -14,6 +14,14 @@ describe("prompt contracts", () => {
     expect(value.role).toBe("coder");
   });
 
+  it("requires the coder to report Git's exact full commit hash", () => {
+    const task = makeTask({ status: "running", worktree: "/repo/.worktrees/T1-kd" });
+    const value = payload(coderPrompt("Goal", task, task.worktree!, {}, undefined, "kd", "coder"));
+    expect(value.requirements).toContain(
+      "After committing, run git rev-parse HEAD and copy its full output exactly into commit; never expand an abbreviated hash.",
+    );
+  });
+
   it("names the integration branch", () => {
     const task = makeTask({ status: "integrating" });
     const value = payload(integratorPrompt(

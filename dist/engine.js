@@ -69,6 +69,10 @@ export class OrchestratorEngine {
         return result;
     }
     async run() {
+        if (!existsSync(join(this.store.root, "plan.json")) ||
+            !existsSync(join(this.store.root, "state.json"))) {
+            throw new EngineError("no persisted plan; run plan GOAL first");
+        }
         let state = this.store.loadState();
         const plannerIdentity = agentForRole(this.config, "planner").identity;
         if (state.status === "completed" && state.result !== null) {

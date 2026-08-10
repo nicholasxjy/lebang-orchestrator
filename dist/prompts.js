@@ -46,6 +46,9 @@ export function coderPrompt(goal, task, worktree, dependencyResults, reworkIssue
         branch: task.branch,
         dependencyResults,
         reworkIssues: reworkIssues ?? [],
+        requirements: [
+            "After committing, run git rev-parse HEAD and copy its full output exactly into commit; never expand an abbreviated hash.",
+        ],
         resultContract: {
             taskId: task.id,
             status: "completed | blocked | failed",

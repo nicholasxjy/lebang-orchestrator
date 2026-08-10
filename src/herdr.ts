@@ -3,6 +3,9 @@ import type { AgentConfig } from "./config.js";
 import type { ProcessOptions, ProcessResult } from "./process.js";
 import { runProcess } from "./process.js";
 
+const agentPaneReadyAttempts = 40;
+const agentPaneReadyDelayMs = 250;
+
 export class HerdrError extends Error {
   override readonly name = "HerdrError";
 }
@@ -213,38 +216,47 @@ export class HerdrAdapter {
   }
 
   private async startAgent(spec: HerdrAgentSpec, paneId: string): Promise<void> {
-    await this.run(
-      [
-        this.command,
-        "agent",
-        "start",
-        spec.agent.identity,
-        "--kind",
-        "pi",
-        "--pane",
-        paneId,
-        "--",
-        "--mode",
-        "text",
-        "--model",
-        spec.agent.model,
-        "--skill",
-        spec.skillPath,
-        "--no-extensions",
-        "--no-skills",
-        "--no-prompt-templates",
-        "--no-themes",
-        "--tools",
-        spec.tools.join(","),
-        "--session-dir",
-        spec.sessionDir,
-        "--name",
-        spec.agent.identity,
-      ],
-      spec.cwd,
-      60_000,
-      `start ${spec.agent.identity}`,
-    );
+    const command = [
+      this.command,
+      "agent",
+      "start",
+      spec.agent.identity,
+      "--kind",
+      "pi",
+      "--pane",
+      paneId,
+      "--",
+      "--mode",
+      "text",
+      "--model",
+      spec.agent.model,
+      "--skill",
+      spec.skillPath,
+      "--no-extensions",
+      "--no-skills",
+      "--no-prompt-templates",
+      "--no-themes",
+      "--tools",
+      spec.tools.join(","),
+      "--session-dir",
+      spec.sessionDir,
+      "--name",
+      spec.agent.identity,
+    ];
+    for (let attempt = 1; attempt <= agentPaneReadyAttempts; attempt += 1) {
+      const result = await this.execute(command, spec.cwd, { timeoutMs: 60_000 });
+      if (result.exitCode === 0) return;
+      if (
+        responseErrorCode(result) !== "agent_pane_busy" ||
+        attempt === agentPaneReadyAttempts
+      ) {
+        const detail = processResultDetail(result);
+        throw new HerdrError(
+          `Herdr start ${spec.agent.identity} failed with ${result.exitCode}: ${detail}`,
+        );
+      }
+      await delay(agentPaneReadyDelayMs);
+    }
   }
 
   private async run(
@@ -255,11 +267,32 @@ export class HerdrAdapter {
   ): Promise<ProcessResult> {
     const result = await this.execute(command, cwd, { timeoutMs });
     if (result.exitCode !== 0) {
-      const detail = result.stderr.trim() || result.stdout.trim() || "no output";
+      const detail = processResultDetail(result);
       throw new HerdrError(`Herdr ${action} failed with ${result.exitCode}: ${detail}`);
     }
     return result;
   }
+}
+
+function responseErrorCode(result: ProcessResult): string | undefined {
+  for (const output of [result.stderr, result.stdout]) {
+    if (!output.trim()) continue;
+    try {
+      const response = JSON.parse(output) as { error?: { code?: unknown } };
+      if (typeof response.error?.code === "string") return response.error.code;
+    } catch {
+      // Non-JSON errors are handled as ordinary Herdr command failures.
+    }
+  }
+  return undefined;
+}
+
+function processResultDetail(result: ProcessResult): string {
+  return result.stderr.trim() || result.stdout.trim() || "no output";
+}
+
+async function delay(milliseconds: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function responsePaneId(stdout: string): string | undefined {

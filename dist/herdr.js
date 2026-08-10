@@ -1,5 +1,7 @@
 import { basename } from "node:path";
 import { runProcess } from "./process.js";
+const agentPaneReadyAttempts = 40;
+const agentPaneReadyDelayMs = 250;
 export class HerdrError extends Error {
     name = "HerdrError";
 }
@@ -146,7 +148,7 @@ export class HerdrAdapter {
         return paneIds;
     }
     async startAgent(spec, paneId) {
-        await this.run([
+        const command = [
             this.command,
             "agent",
             "start",
@@ -172,16 +174,48 @@ export class HerdrAdapter {
             spec.sessionDir,
             "--name",
             spec.agent.identity,
-        ], spec.cwd, 60_000, `start ${spec.agent.identity}`);
+        ];
+        for (let attempt = 1; attempt <= agentPaneReadyAttempts; attempt += 1) {
+            const result = await this.execute(command, spec.cwd, { timeoutMs: 60_000 });
+            if (result.exitCode === 0)
+                return;
+            if (responseErrorCode(result) !== "agent_pane_busy" ||
+                attempt === agentPaneReadyAttempts) {
+                const detail = processResultDetail(result);
+                throw new HerdrError(`Herdr start ${spec.agent.identity} failed with ${result.exitCode}: ${detail}`);
+            }
+            await delay(agentPaneReadyDelayMs);
+        }
     }
     async run(command, cwd, timeoutMs, action) {
         const result = await this.execute(command, cwd, { timeoutMs });
         if (result.exitCode !== 0) {
-            const detail = result.stderr.trim() || result.stdout.trim() || "no output";
+            const detail = processResultDetail(result);
             throw new HerdrError(`Herdr ${action} failed with ${result.exitCode}: ${detail}`);
         }
         return result;
     }
+}
+function responseErrorCode(result) {
+    for (const output of [result.stderr, result.stdout]) {
+        if (!output.trim())
+            continue;
+        try {
+            const response = JSON.parse(output);
+            if (typeof response.error?.code === "string")
+                return response.error.code;
+        }
+        catch {
+            // Non-JSON errors are handled as ordinary Herdr command failures.
+        }
+    }
+    return undefined;
+}
+function processResultDetail(result) {
+    return result.stderr.trim() || result.stdout.trim() || "no output";
+}
+async function delay(milliseconds) {
+    await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 function responsePaneId(stdout) {
     const response = parseResponse(stdout);

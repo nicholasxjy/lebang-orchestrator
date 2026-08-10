@@ -81,6 +81,58 @@ describe("Herdr adapter", () => {
     expect(invoked.some((command) => command[2] === "prompt")).toBe(false);
   });
 
+  it("waits for newly created panes to become available shells", async () => {
+    const startAttempts = new Map<string, number>();
+    const adapter = new HerdrAdapter(
+      true,
+      "herdr",
+      "/repo",
+      async (command) => {
+        if (command[1] === "agent" && command[2] === "get") {
+          return result("", 1, "unknown agent");
+        }
+        if (command[1] === "tab" && command[2] === "create") {
+          return result(JSON.stringify({
+            result: { tab: { tab_id: "w1:t2" }, root_pane: { pane_id: "w1:p1" } },
+          }));
+        }
+        if (command[1] === "pane" && command[2] === "layout") {
+          return result(JSON.stringify({
+            result: { layout: { panes: [{ pane_id: "w1:p1", rect: { width: 160, height: 40 } }] } },
+          }));
+        }
+        if (command[1] === "pane" && command[2] === "split") {
+          return result(JSON.stringify({ result: { pane: { pane_id: "w1:p2" } } }));
+        }
+        if (command[1] === "agent" && command[2] === "start") {
+          const identity = command[3]!;
+          const attempts = (startAttempts.get(identity) ?? 0) + 1;
+          startAttempts.set(identity, attempts);
+          if (attempts === 1) {
+            return result(
+              "",
+              1,
+              JSON.stringify({
+                error: {
+                  code: "agent_pane_busy",
+                  message: `agent target pane ${command[7]} is not an available shell`,
+                },
+              }),
+            );
+          }
+        }
+        return result(JSON.stringify({ result: {} }));
+      },
+      { HERDR_ENV: "1", HERDR_WORKSPACE_ID: "w1" },
+    );
+
+    const team = await adapter.initialize([spec, coderSpec]);
+
+    expect(team.agents.curry).toEqual({ paneId: "w1:p1", reused: false });
+    expect(team.agents.kd).toEqual({ paneId: "w1:p2", reused: false });
+    expect(startAttempts).toEqual(new Map([["curry", 2], ["kd", 2]]));
+  });
+
   it("reuses a live named agent and transports prompts through Herdr", async () => {
     const invoked: Array<readonly string[]> = [];
     const marker = "ORCHESTRATOR_RESULT_RUN1";

@@ -1,4 +1,3 @@
-import { basename } from "node:path";
 import { runProcess } from "./process.js";
 const agentPaneReadyAttempts = 40;
 const agentPaneReadyDelayMs = 250;
@@ -17,29 +16,6 @@ export class HerdrAdapter {
         this.repoRoot = repoRoot;
         this.execute = execute;
         this.environment = environment;
-    }
-    async initialize(specs) {
-        this.assertSession();
-        const agents = {};
-        const missing = [];
-        for (const spec of specs) {
-            const existing = await this.existingAgent(spec);
-            if (existing === undefined)
-                missing.push(spec);
-            else
-                agents[spec.agent.identity] = existing;
-        }
-        if (missing.length === 0)
-            return { tabId: null, agents };
-        const tab = await this.createTab(this.repoRoot, `orchestrator-${basename(this.repoRoot)}`);
-        const paneIds = await this.createBalancedPanes(tab.rootPaneId, missing.length, this.repoRoot);
-        for (let index = 0; index < missing.length; index += 1) {
-            const spec = missing[index];
-            const paneId = paneIds[index];
-            await this.startAgent(spec, paneId);
-            agents[spec.agent.identity] = { paneId, reused: false };
-        }
-        return { tabId: tab.tabId, agents };
     }
     async runAgent(spec, prompt, marker, timeoutMs) {
         this.assertSession();
@@ -123,29 +99,6 @@ export class HerdrAdapter {
             throw new HerdrError(`Herdr tab create for ${label} returned incomplete identifiers`);
         }
         return { tabId, rootPaneId };
-    }
-    async createBalancedPanes(rootPaneId, count, cwd) {
-        const paneIds = [rootPaneId];
-        while (paneIds.length < count) {
-            const layout = await this.run([this.command, "pane", "layout", "--pane", rootPaneId], cwd, 30_000, "inspect team layout");
-            const target = layoutSplit(layout.stdout, rootPaneId);
-            const split = await this.run([
-                this.command,
-                "pane",
-                "split",
-                target.paneId,
-                "--direction",
-                target.direction,
-                "--cwd",
-                cwd,
-                "--no-focus",
-            ], cwd, 30_000, "create team pane");
-            const paneId = responsePaneId(split.stdout);
-            if (!paneId)
-                throw new HerdrError("Herdr pane split returned no pane_id");
-            paneIds.push(paneId);
-        }
-        return paneIds;
     }
     async startAgent(spec, paneId) {
         const command = [
@@ -242,32 +195,6 @@ function responseText(stdout) {
     values.sort((left, right) => right.length - left.length);
     return values.join("\n");
 }
-function layoutSplit(stdout, fallbackPaneId) {
-    const response = parseResponse(stdout);
-    const panes = findArray(response, "panes");
-    let selected;
-    for (const value of panes ?? []) {
-        if (value === null || typeof value !== "object" || Array.isArray(value))
-            continue;
-        const pane = value;
-        const rect = pane.rect;
-        if (typeof pane.pane_id !== "string" || rect === null || typeof rect !== "object")
-            continue;
-        const width = rect.width;
-        const height = rect.height;
-        if (typeof width !== "number" || typeof height !== "number")
-            continue;
-        if (selected === undefined || width * height > selected.width * selected.height) {
-            selected = { paneId: pane.pane_id, width, height };
-        }
-    }
-    if (selected === undefined)
-        return { paneId: fallbackPaneId, direction: "right" };
-    return {
-        paneId: selected.paneId,
-        direction: selected.width >= selected.height * 2 ? "right" : "down",
-    };
-}
 function parseResponse(stdout) {
     try {
         return JSON.parse(stdout);
@@ -291,26 +218,6 @@ function findString(value, keys) {
         if (keys.has(key) && typeof item === "string")
             return item;
         const found = findString(item, keys);
-        if (found !== undefined)
-            return found;
-    }
-    return undefined;
-}
-function findArray(value, key) {
-    if (value === null || typeof value !== "object")
-        return undefined;
-    if (Array.isArray(value)) {
-        for (const item of value) {
-            const found = findArray(item, key);
-            if (found !== undefined)
-                return found;
-        }
-        return undefined;
-    }
-    for (const [candidate, item] of Object.entries(value)) {
-        if (candidate === key && Array.isArray(item))
-            return item;
-        const found = findArray(item, key);
         if (found !== undefined)
             return found;
     }

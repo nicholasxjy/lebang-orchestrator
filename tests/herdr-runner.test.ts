@@ -67,33 +67,4 @@ describe("Herdr runner", () => {
     expect(record).toMatchObject({ agent: "curry", model: config.agents.curry!.model, exitCode: 0 });
     expect(record.structuredResult).toEqual(review);
   });
-
-  it("prewarms every fixed role and only maxWorkers coders", async () => {
-    const root = temporaryDirectory(); roots.push(root);
-    const config = testConfig({
-      herdr: { enabled: true, command: "herdr" },
-      maxWorkers: 2,
-    });
-    config.agents.harden = { ...config.agents.kd!, identity: "harden" };
-    config.agents.sga = { ...config.agents.kd!, identity: "sga" };
-    const adapter = new HerdrAdapter(
-      true,
-      "herdr",
-      root,
-      async (command) => processResult(JSON.stringify({
-        result: { agent: { pane_id: `w1:${command[3]}`, cwd: root } },
-      })),
-      { HERDR_ENV: "1" },
-    );
-    const runner = new HerdrRunner(
-      root,
-      new RunStore(join(root, ".orchestrator")),
-      config,
-      adapter,
-    );
-    const team = await runner.initializeTeam();
-    expect(Object.keys(team.agents)).toEqual([
-      "lebang", "westbrook", "curry", "duncan", "kd", "harden",
-    ]);
-  });
 });

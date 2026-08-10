@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from "node:fs";
+import { constants, copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
@@ -28,6 +28,18 @@ const ConfigSchema = Type.Object({
     agents: Type.Record(Type.String({ minLength: 1 }), AgentSchema),
 });
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+export function initializeProjectConfig(repoRoot) {
+    const directory = join(resolve(repoRoot), ".orchestrator");
+    const path = join(directory, "config.json");
+    if (existsSync(path)) {
+        if (!isFile(path))
+            throw new SchemaError(`configuration path is not a file: ${path}`);
+        return { path, created: false };
+    }
+    mkdirSync(directory, { recursive: true });
+    copyFileSync(join(packageRoot, ".orchestrator", "config.json"), path, constants.COPYFILE_EXCL);
+    return { path, created: true };
+}
 export function parseConfig(value) {
     if (!Value.Check(ConfigSchema, value)) {
         const first = Value.Errors(ConfigSchema, value)[0];

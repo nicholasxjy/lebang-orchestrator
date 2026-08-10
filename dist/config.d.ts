@@ -22,6 +22,10 @@ export interface OrchestratorConfig {
     };
     agents: Record<string, AgentConfig>;
 }
+export declare function initializeProjectConfig(repoRoot: string): {
+    path: string;
+    created: boolean;
+};
 export declare function parseConfig(value: unknown): OrchestratorConfig;
 export declare function loadConfig(path: string): OrchestratorConfig;
 export declare function resolveConfigPath(repoRoot: string, explicit?: string): string;

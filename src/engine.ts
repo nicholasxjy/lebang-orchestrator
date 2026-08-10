@@ -8,7 +8,7 @@ import {
   type OrchestratorConfig,
 } from "./config.js";
 import { GitError, GitManager, isTestSupportPath } from "./git.js";
-import { HerdrAdapter, type HerdrTeam } from "./herdr.js";
+import { HerdrAdapter } from "./herdr.js";
 import { HerdrRunner } from "./herdr-runner.js";
 import {
   SchemaError,
@@ -64,11 +64,6 @@ export class OrchestratorEngine {
       ? new HerdrRunner(this.repoRoot, this.store, config, this.herdr)
       : undefined;
     this.runner = runner ?? this.herdrRunner ?? new PiRunner(this.repoRoot, this.store);
-  }
-
-  async initializeTeam(): Promise<HerdrTeam> {
-    if (!this.herdrRunner) throw new EngineError("init requires herdr.enabled=true");
-    return this.herdrRunner.initializeTeam();
   }
 
   async planGoal(goal: string): Promise<Plan> {

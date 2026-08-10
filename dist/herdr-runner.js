@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { agentForRole, resolveSkillPath, } from "./config.js";
+import { resolveSkillPath, } from "./config.js";
 import { formatJson } from "./json.js";
 import { utcNow } from "./persistence.js";
 import { AgentRunError, RoleTools, } from "./runner.js";
@@ -16,9 +16,6 @@ export class HerdrRunner {
         this.config = config;
         this.herdr = herdr;
         this.timeoutMs = timeoutMs;
-    }
-    async initializeTeam() {
-        return this.herdr.initialize(initialAgents(this.config).map((agent) => this.spec(agent, this.repoRoot)));
     }
     async run(request) {
         const runId = randomUUID().replaceAll("-", "");
@@ -94,22 +91,6 @@ export function parseHerdrResult(transcript, marker, parser) {
         throw new AgentRunError("Herdr transcript did not contain a valid marked result");
     }
     return last;
-}
-function initialAgents(config) {
-    const fixed = ["planner", "tester", "reviewer", "integrator"];
-    const agents = fixed.map((role) => agentForRole(config, role));
-    const coders = Object.values(config.agents)
-        .filter((agent) => agent.role === "coder")
-        .sort((left, right) => {
-        if (left.identity === "kd")
-            return -1;
-        if (right.identity === "kd")
-            return 1;
-        return left.identity.localeCompare(right.identity);
-    })
-        .slice(0, config.maxWorkers);
-    const byIdentity = new Map([...agents, ...coders].map((agent) => [agent.identity, agent]));
-    return [...byIdentity.values()];
 }
 function formatLog(record) {
     const { stdout, stderr, ...metadata } = record;

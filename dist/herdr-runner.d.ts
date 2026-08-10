@@ -1,5 +1,5 @@
 import { type OrchestratorConfig } from "./config.js";
-import { HerdrAdapter, type HerdrTeam } from "./herdr.js";
+import { HerdrAdapter } from "./herdr.js";
 import type { ResultParser } from "./models.js";
 import { type RunStore } from "./persistence.js";
 import { type AgentRunner, type AgentRunRequest, type PiRunArtifact } from "./runner.js";
@@ -10,7 +10,6 @@ export declare class HerdrRunner implements AgentRunner {
     readonly herdr: HerdrAdapter;
     readonly timeoutMs: number;
     constructor(repoRoot: string, store: RunStore, config: OrchestratorConfig, herdr: HerdrAdapter, timeoutMs?: number);
-    initializeTeam(): Promise<HerdrTeam>;
     run<T>(request: AgentRunRequest<T>): Promise<[T, PiRunArtifact]>;
     private spec;
 }

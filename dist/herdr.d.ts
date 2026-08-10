@@ -14,10 +14,6 @@ export interface HerdrAgentLocation {
     paneId: string;
     reused: boolean;
 }
-export interface HerdrTeam {
-    tabId: string | null;
-    agents: Record<string, HerdrAgentLocation>;
-}
 export declare class HerdrAdapter {
     readonly enabled: boolean;
     readonly command: string;
@@ -25,13 +21,11 @@ export declare class HerdrAdapter {
     readonly execute: (command: readonly string[], cwd: string, options?: ProcessOptions) => Promise<ProcessResult>;
     readonly environment: NodeJS.ProcessEnv;
     constructor(enabled: boolean, command: string, repoRoot: string, execute?: (command: readonly string[], cwd: string, options?: ProcessOptions) => Promise<ProcessResult>, environment?: NodeJS.ProcessEnv);
-    initialize(specs: readonly HerdrAgentSpec[]): Promise<HerdrTeam>;
     runAgent(spec: HerdrAgentSpec, prompt: string, marker: string, timeoutMs: number): Promise<string>;
     private assertSession;
     private ensureAgent;
     private existingAgent;
     private createTab;
-    private createBalancedPanes;
     private startAgent;
     private run;
 }

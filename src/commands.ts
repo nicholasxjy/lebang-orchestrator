@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { loadConfig, resolveConfigPath } from "./config.js";
+import { initializeProjectConfig, loadConfig, resolveConfigPath } from "./config.js";
 import { EngineError, OrchestratorEngine } from "./engine.js";
 import { formatJson } from "./json.js";
 import { SchemaError } from "./models.js";
@@ -33,7 +33,7 @@ const commands = new Set([
 export const helpText = `usage: orchestrator [--repo PATH] [--config PATH] COMMAND [ARG]
 
 commands:
-  init         start the configured Herdr team without prompting an agent
+  init         create .orchestrator/config.json for this project
   plan GOAL    plan a user goal through lebang
   run          run ready tasks through the full lifecycle
   status       show persisted orchestration status
@@ -66,6 +66,14 @@ export async function executeCommand(
     const repo = resolve(
       parsed.repo ?? options.defaultRepo ?? await gitRoot(cwd),
     );
+    if (parsed.command === "init") {
+      const initialized = initializeProjectConfig(repo);
+      io.stdout(
+        `${initialized.created ? "Created" : "Configuration already exists:"} ${initialized.path}\n` +
+        `Configure agent models, roles, worker limits, Herdr settings, and validation commands before running plan.\n`,
+      );
+      return 0;
+    }
     const store = new RunStore(join(repo, ".orchestrator"));
     if (parsed.command === "status") {
       io.stdout(printStatus(store));
@@ -92,9 +100,6 @@ export async function executeCommand(
     const engine = new OrchestratorEngine(repo, loadConfig(configPath));
     let value: unknown;
     switch (parsed.command) {
-      case "init":
-        value = await engine.initializeTeam();
-        break;
       case "plan":
         value = await engine.planGoal(parsed.values[0]!);
         break;

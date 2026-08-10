@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
-  agentForRole,
   resolveSkillPath,
   type AgentConfig,
   type OrchestratorConfig,
@@ -9,7 +8,6 @@ import {
 import {
   HerdrAdapter,
   type HerdrAgentSpec,
-  type HerdrTeam,
 } from "./herdr.js";
 import { formatJson } from "./json.js";
 import type { PiRunRecord, ResultParser } from "./models.js";
@@ -30,10 +28,6 @@ export class HerdrRunner implements AgentRunner {
     readonly herdr: HerdrAdapter,
     readonly timeoutMs = 3_600_000,
   ) {}
-
-  async initializeTeam(): Promise<HerdrTeam> {
-    return this.herdr.initialize(initialAgents(this.config).map((agent) => this.spec(agent, this.repoRoot)));
-  }
 
   async run<T>(request: AgentRunRequest<T>): Promise<[T, PiRunArtifact]> {
     const runId = randomUUID().replaceAll("-", "");
@@ -125,21 +119,6 @@ export function parseHerdrResult<T>(
     throw new AgentRunError("Herdr transcript did not contain a valid marked result");
   }
   return last;
-}
-
-function initialAgents(config: OrchestratorConfig): AgentConfig[] {
-  const fixed = ["planner", "tester", "reviewer", "integrator"] as const;
-  const agents = fixed.map((role) => agentForRole(config, role));
-  const coders = Object.values(config.agents)
-    .filter((agent) => agent.role === "coder")
-    .sort((left, right) => {
-      if (left.identity === "kd") return -1;
-      if (right.identity === "kd") return 1;
-      return left.identity.localeCompare(right.identity);
-    })
-    .slice(0, config.maxWorkers);
-  const byIdentity = new Map([...agents, ...coders].map((agent) => [agent.identity, agent]));
-  return [...byIdentity.values()];
 }
 
 function formatLog(record: PiRunRecord): string {

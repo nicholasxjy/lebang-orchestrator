@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
@@ -30,29 +30,37 @@ function capture(): { io: CommandIo; stdout(): string; stderr(): string } {
 }
 
 describe("command service", () => {
-  it("exposes init and requires Herdr mode", async () => {
+  it("initializes project configuration without starting Herdr", async () => {
     const parent = temporaryDirectory(); roots.push(parent);
     const { root } = createRepository(join(parent, "repo"));
-    mkdirSync(join(root, ".orchestrator"), { recursive: true });
-    writeFileSync(join(root, ".orchestrator", "config.json"), JSON.stringify({
-      maxWorkers: 1,
-      maxReviewAttempts: 1,
-      validationCommands: [["npm", "test"]],
-      herdr: { enabled: false, command: "herdr" },
-      agents: {
-        lebang: { role: "planner", skill: "planner", model: "example/planner" },
-        kd: { role: "coder", skill: "coder", model: "example/coder" },
-        westbrook: { role: "tester", skill: "tester", model: "example/tester" },
-        curry: { role: "reviewer", skill: "reviewer", model: "example/reviewer" },
-        duncan: { role: "integrator", skill: "integrator", model: "example/integrator" },
-      },
-    }));
     const help = capture();
     expect(await executeCommand(["--help"], { io: help.io })).toBe(0);
-    expect(help.stdout()).toContain("init         start the configured Herdr team");
+    expect(help.stdout()).toContain("init         create .orchestrator/config.json");
     const output = capture();
-    expect(await executeCommand(["--repo", root, "init"], { io: output.io })).toBe(2);
-    expect(output.stderr()).toContain("init requires herdr.enabled=true");
+    const previousHerdrEnv = process.env.HERDR_ENV;
+    delete process.env.HERDR_ENV;
+    try {
+      expect(await executeCommand(["--repo", root, "init"], { io: output.io })).toBe(0);
+    } finally {
+      if (previousHerdrEnv === undefined) delete process.env.HERDR_ENV;
+      else process.env.HERDR_ENV = previousHerdrEnv;
+    }
+    const configPath = join(root, ".orchestrator", "config.json");
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    expect(config).toMatchObject({
+      agents: { lebang: { role: "planner" } },
+      herdr: { command: "herdr" },
+    });
+    expect(output.stdout()).toContain(configPath);
+    expect(output.stdout()).toContain("Configure");
+
+    const custom = '{"custom":true}\n';
+    writeFileSync(configPath, custom);
+    const existing = capture();
+    expect(await executeCommand(["--repo", root, "init"], { io: existing.io })).toBe(0);
+    expect(readFileSync(configPath, "utf8")).toBe(custom);
+    expect(existing.stdout()).toContain("already exists");
+
     const invalid = capture();
     expect(await executeCommand(["--repo", root, "init", "Goal"], { io: invalid.io })).toBe(2);
     expect(invalid.stderr()).toContain("init requires no arguments");
@@ -186,7 +194,7 @@ describe("command service", () => {
       symbol: "!", notification: "warning", message: "Run blocked",
     });
     expect(classifyOutcome(0, "init", '{"status":"blocked"}', "")).toMatchObject({
-      symbol: "✓", notification: "info", message: "Herdr team ready",
+      symbol: "✓", notification: "info", message: "Configuration ready",
     });
     expect(classifyOutcome(2, "plan", "", "orchestrator: bad config\n")).toMatchObject({
       symbol: "✗", notification: "error", message: "Plan failed — bad config",

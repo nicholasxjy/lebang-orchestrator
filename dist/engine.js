@@ -33,11 +33,6 @@ export class OrchestratorEngine {
             : undefined;
         this.runner = runner ?? this.herdrRunner ?? new PiRunner(this.repoRoot, this.store);
     }
-    async initializeTeam() {
-        if (!this.herdrRunner)
-            throw new EngineError("init requires herdr.enabled=true");
-        return this.herdrRunner.initializeTeam();
-    }
     async planGoal(goal) {
         if (!goal.trim())
             throw new EngineError("goal must not be empty");

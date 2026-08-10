@@ -8,10 +8,10 @@ import { executeCommand, type CommandIo } from "./commands.js";
 
 const statusKey = "lebang-orchestrator";
 const progressCommands = new Set(["run", "retry", "review", "integrate", "resume"]);
-const longCommands = new Set(["init", "plan", ...progressCommands]);
+const longCommands = new Set(["plan", ...progressCommands]);
 const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const commandSuggestions = [
-  ["init", "Start the configured Herdr team"],
+  ["init", "Create project configuration"],
   ["plan", "Create a task DAG for a goal"],
   ["run", "Run ready tasks through integration"],
   ["status", "Show persisted orchestration status"],
@@ -173,7 +173,7 @@ export function classifyOutcome(
 
 function actionFor(command: string): string {
   return {
-    init: "Starting configured Herdr team",
+    init: "Creating project configuration",
     plan: "Planning task DAG",
     run: "Running task lifecycle",
     status: "Loading status",
@@ -189,7 +189,7 @@ function actionFor(command: string): string {
 
 function completionLabel(command: string): string {
   return {
-    init: "Initialization",
+    init: "Configuration",
     plan: "Plan",
     run: "Run",
     status: "Status",
@@ -206,7 +206,7 @@ function completionLabel(command: string): string {
 
 function successMessage(command: string): string {
   return {
-    init: "Herdr team ready",
+    init: "Configuration ready",
     plan: "Plan created",
     run: "Run completed",
     status: "Status loaded",

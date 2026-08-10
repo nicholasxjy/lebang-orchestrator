@@ -1,4 +1,3 @@
-import { basename } from "node:path";
 import type { AgentConfig } from "./config.js";
 import type { ProcessOptions, ProcessResult } from "./process.js";
 import { runProcess } from "./process.js";
@@ -23,11 +22,6 @@ export interface HerdrAgentLocation {
   reused: boolean;
 }
 
-export interface HerdrTeam {
-  tabId: string | null;
-  agents: Record<string, HerdrAgentLocation>;
-}
-
 export class HerdrAdapter {
   constructor(
     readonly enabled: boolean,
@@ -40,28 +34,6 @@ export class HerdrAdapter {
     ) => Promise<ProcessResult> = runProcess,
     readonly environment: NodeJS.ProcessEnv = process.env,
   ) {}
-
-  async initialize(specs: readonly HerdrAgentSpec[]): Promise<HerdrTeam> {
-    this.assertSession();
-    const agents: Record<string, HerdrAgentLocation> = {};
-    const missing: HerdrAgentSpec[] = [];
-    for (const spec of specs) {
-      const existing = await this.existingAgent(spec);
-      if (existing === undefined) missing.push(spec);
-      else agents[spec.agent.identity] = existing;
-    }
-    if (missing.length === 0) return { tabId: null, agents };
-
-    const tab = await this.createTab(this.repoRoot, `orchestrator-${basename(this.repoRoot)}`);
-    const paneIds = await this.createBalancedPanes(tab.rootPaneId, missing.length, this.repoRoot);
-    for (let index = 0; index < missing.length; index += 1) {
-      const spec = missing[index]!;
-      const paneId = paneIds[index]!;
-      await this.startAgent(spec, paneId);
-      agents[spec.agent.identity] = { paneId, reused: false };
-    }
-    return { tabId: tab.tabId, agents };
-  }
 
   async runAgent(
     spec: HerdrAgentSpec,
@@ -178,43 +150,6 @@ export class HerdrAdapter {
     return { tabId, rootPaneId };
   }
 
-  private async createBalancedPanes(
-    rootPaneId: string,
-    count: number,
-    cwd: string,
-  ): Promise<string[]> {
-    const paneIds = [rootPaneId];
-    while (paneIds.length < count) {
-      const layout = await this.run(
-        [this.command, "pane", "layout", "--pane", rootPaneId],
-        cwd,
-        30_000,
-        "inspect team layout",
-      );
-      const target = layoutSplit(layout.stdout, rootPaneId);
-      const split = await this.run(
-        [
-          this.command,
-          "pane",
-          "split",
-          target.paneId,
-          "--direction",
-          target.direction,
-          "--cwd",
-          cwd,
-          "--no-focus",
-        ],
-        cwd,
-        30_000,
-        "create team pane",
-      );
-      const paneId = responsePaneId(split.stdout);
-      if (!paneId) throw new HerdrError("Herdr pane split returned no pane_id");
-      paneIds.push(paneId);
-    }
-    return paneIds;
-  }
-
   private async startAgent(spec: HerdrAgentSpec, paneId: string): Promise<void> {
     const command = [
       this.command,
@@ -323,32 +258,6 @@ function responseText(stdout: string): string {
   return values.join("\n");
 }
 
-function layoutSplit(
-  stdout: string,
-  fallbackPaneId: string,
-): { paneId: string; direction: "right" | "down" } {
-  const response = parseResponse(stdout);
-  const panes = findArray(response, "panes");
-  let selected: { paneId: string; width: number; height: number } | undefined;
-  for (const value of panes ?? []) {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
-    const pane = value as Record<string, unknown>;
-    const rect = pane.rect;
-    if (typeof pane.pane_id !== "string" || rect === null || typeof rect !== "object") continue;
-    const width = (rect as Record<string, unknown>).width;
-    const height = (rect as Record<string, unknown>).height;
-    if (typeof width !== "number" || typeof height !== "number") continue;
-    if (selected === undefined || width * height > selected.width * selected.height) {
-      selected = { paneId: pane.pane_id, width, height };
-    }
-  }
-  if (selected === undefined) return { paneId: fallbackPaneId, direction: "right" };
-  return {
-    paneId: selected.paneId,
-    direction: selected.width >= selected.height * 2 ? "right" : "down",
-  };
-}
-
 function parseResponse(stdout: string): unknown {
   try {
     return JSON.parse(stdout);
@@ -369,23 +278,6 @@ function findString(value: unknown, keys: Set<string>): string | undefined {
   for (const [key, item] of Object.entries(value)) {
     if (keys.has(key) && typeof item === "string") return item;
     const found = findString(item, keys);
-    if (found !== undefined) return found;
-  }
-  return undefined;
-}
-
-function findArray(value: unknown, key: string): unknown[] | undefined {
-  if (value === null || typeof value !== "object") return undefined;
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findArray(item, key);
-      if (found !== undefined) return found;
-    }
-    return undefined;
-  }
-  for (const [candidate, item] of Object.entries(value)) {
-    if (candidate === key && Array.isArray(item)) return item;
-    const found = findArray(item, key);
     if (found !== undefined) return found;
   }
   return undefined;

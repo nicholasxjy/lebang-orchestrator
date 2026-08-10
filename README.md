@@ -90,21 +90,22 @@ The package contains a default `.orchestrator/config.json`. A target repository
 can override it by creating its own `.orchestrator/config.json`; an explicit
 `--config` path takes precedence over both.
 
-## Quick start: Herdr team
+## Quick start
 
-Start the configured team from a Herdr-managed pane in the target repository:
+Create a project-local configuration from the packaged template:
 
 ```bash
 orchestrator init
 ```
 
-`init` creates a dedicated tab with visible named panes for `lebang`,
-`westbrook`, `curry`, `duncan`, and up to `maxWorkers` coders. Every pane starts
-in interactive text mode with the configured Pi model, role Skill, and tool
-policy. `init` does not send a prompt to any agent. A coder selected later by
-the plan is started lazily.
+`init` only creates `.orchestrator/config.json` in the target repository and
+prints a reminder to configure it. It does not load the configuration, start
+Herdr, open an agent, or send a prompt. If the file already exists, `init`
+leaves it unchanged.
 
-Send the goal to the planner, inspect the plan, and then run it:
+Edit the generated models, roles, worker limits, Herdr settings, and validation
+commands. Then send the goal to the planner from a Herdr-managed pane when
+Herdr is enabled, inspect the plan, and run it:
 
 ```bash
 # Ask lebang to create only the persisted task DAG.
@@ -242,7 +243,7 @@ owner are never run concurrently.
 
 | Command | Behavior | Model call |
 | --- | --- | --- |
-| `init` | Starts the configured agents in visible Herdr panes without prompting them. | No |
+| `init` | Creates `.orchestrator/config.json` from the packaged template without overwriting an existing file. | No |
 | `plan <goal>` | Inspects the repository, creates and persists a validated DAG. Fails if a plan already exists. | Yes |
 | `run` | Runs ready tasks and automatically integrates after every active task is approved. | Yes |
 | `status` | Prints run state, task owners, branches, dependencies, review counts, and the latest blocker. | No |
@@ -330,7 +331,7 @@ Configuration rules that matter in practice:
   parsing.
 - `herdr.enabled=true` makes visible pane agents the execution path and requires
   the command to run inside Herdr. Set it to `false` only for the in-process SDK
-  fallback; `init` is unavailable in that mode.
+  fallback. `init` itself does not depend on this setting.
 
 Configure agent identities, roles, role Skills, models, concurrency, review
 limits, Herdr, and final validation commands in `.orchestrator/config.json`.

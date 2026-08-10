@@ -18,7 +18,6 @@ export declare class OrchestratorEngine {
     readonly runner: AgentRunner;
     constructor(repoRoot: string, config: OrchestratorConfig, runner?: AgentRunner);
     initializeTeam(): Promise<HerdrTeam>;
-    presentToPlanner(result: RunResult | Error): Promise<void>;
     planGoal(goal: string): Promise<Plan>;
     run(): Promise<RunResult>;
     private executeTask;

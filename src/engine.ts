@@ -71,11 +71,6 @@ export class OrchestratorEngine {
     return this.herdrRunner.initializeTeam();
   }
 
-  async presentToPlanner(result: RunResult | Error): Promise<void> {
-    if (!this.herdrRunner) throw new EngineError("planner presentation requires Herdr");
-    await this.herdrRunner.presentToPlanner(result);
-  }
-
   async planGoal(goal: string): Promise<Plan> {
     if (!goal.trim()) throw new EngineError("goal must not be empty");
     const baseCommit = await this.git.currentCommit();

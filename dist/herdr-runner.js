@@ -20,21 +20,6 @@ export class HerdrRunner {
     async initializeTeam() {
         return this.herdr.initialize(initialAgents(this.config).map((agent) => this.spec(agent, this.repoRoot)));
     }
-    async presentToPlanner(result) {
-        const planner = agentForRole(this.config, "planner");
-        const message = result instanceof Error
-            ? [
-                "The orchestration stopped with an error.",
-                `Error: ${result.message}`,
-                "Inspect the persisted .orchestrator state, explain the blocker, and show the next recovery command.",
-            ].join("\n")
-            : [
-                "The orchestration lifecycle has finished.",
-                formatJson(result),
-                "Present the final goal status concisely. Distinguish completed, blocked, and failed outcomes.",
-            ].join("\n");
-        await this.herdr.present(this.spec(planner, this.repoRoot), message, this.timeoutMs);
-    }
     async run(request) {
         const runId = randomUUID().replaceAll("-", "");
         const marker = `ORCHESTRATOR_RESULT_${runId.toUpperCase()}`;

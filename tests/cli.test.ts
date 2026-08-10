@@ -49,10 +49,13 @@ describe("command service", () => {
     }));
     const help = capture();
     expect(await executeCommand(["--help"], { io: help.io })).toBe(0);
-    expect(help.stdout()).toContain("init GOAL");
+    expect(help.stdout()).toContain("init         start the configured Herdr team");
     const output = capture();
-    expect(await executeCommand(["--repo", root, "init", "Goal"], { io: output.io })).toBe(2);
+    expect(await executeCommand(["--repo", root, "init"], { io: output.io })).toBe(2);
     expect(output.stderr()).toContain("init requires herdr.enabled=true");
+    const invalid = capture();
+    expect(await executeCommand(["--repo", root, "init", "Goal"], { io: invalid.io })).toBe(2);
+    expect(invalid.stderr()).toContain("init requires no arguments");
   });
 
   it("summarizes persisted task states", async () => {
@@ -183,7 +186,7 @@ describe("command service", () => {
       symbol: "!", notification: "warning", message: "Run blocked",
     });
     expect(classifyOutcome(0, "init", '{"status":"blocked"}', "")).toMatchObject({
-      symbol: "!", notification: "warning", message: "Initialization blocked",
+      symbol: "✓", notification: "info", message: "Herdr team ready",
     });
     expect(classifyOutcome(2, "plan", "", "orchestrator: bad config\n")).toMatchObject({
       symbol: "✗", notification: "error", message: "Plan failed — bad config",

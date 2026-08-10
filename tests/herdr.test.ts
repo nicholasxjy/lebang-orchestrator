@@ -75,8 +75,10 @@ describe("Herdr adapter", () => {
     ]));
     expect(invoked[5]).toEqual(expect.arrayContaining([
       "herdr", "agent", "start", "curry", "--kind", "pi", "--pane", "w1:p1",
-      "--model", agent.model, "--skill", spec.skillPath, "--tools", spec.tools.join(","),
+      "--mode", "text", "--model", agent.model, "--skill", spec.skillPath,
+      "--tools", spec.tools.join(","),
     ]));
+    expect(invoked.some((command) => command[2] === "prompt")).toBe(false);
   });
 
   it("reuses a live named agent and transports prompts through Herdr", async () => {
@@ -118,25 +120,4 @@ describe("Herdr adapter", () => {
     await expect(adapter.initialize([spec])).rejects.toThrow(/Herdr-managed pane/);
   });
 
-  it("presents the final status and returns focus to the planner pane", async () => {
-    const invoked: Array<readonly string[]> = [];
-    const adapter = new HerdrAdapter(
-      true,
-      "herdr",
-      "/repo",
-      async (command) => {
-        invoked.push(command);
-        if (command[2] === "get") {
-          return result(JSON.stringify({ result: { agent: { pane_id: "w1:p1", cwd: "/repo" } } }));
-        }
-        return result(JSON.stringify({ result: {} }));
-      },
-      { HERDR_ENV: "1", HERDR_WORKSPACE_ID: "w1" },
-    );
-    await adapter.present(spec, "Goal completed", 1_000);
-    expect(invoked.find((command) => command[2] === "prompt")).toEqual(expect.arrayContaining([
-      "herdr", "agent", "prompt", "curry", "Goal completed", "--wait",
-    ]));
-    expect(invoked.at(-1)).toEqual(["herdr", "agent", "focus", "curry"]);
-  });
 });

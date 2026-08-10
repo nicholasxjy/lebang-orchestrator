@@ -27,7 +27,6 @@ export declare class HerdrAdapter {
     constructor(enabled: boolean, command: string, repoRoot: string, execute?: (command: readonly string[], cwd: string, options?: ProcessOptions) => Promise<ProcessResult>, environment?: NodeJS.ProcessEnv);
     initialize(specs: readonly HerdrAgentSpec[]): Promise<HerdrTeam>;
     runAgent(spec: HerdrAgentSpec, prompt: string, marker: string, timeoutMs: number): Promise<string>;
-    present(spec: HerdrAgentSpec, message: string, timeoutMs: number): Promise<void>;
     private assertSession;
     private ensureAgent;
     private existingAgent;

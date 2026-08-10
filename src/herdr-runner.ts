@@ -12,7 +12,7 @@ import {
   type HerdrTeam,
 } from "./herdr.js";
 import { formatJson } from "./json.js";
-import type { PiRunRecord, ResultParser, RunResult } from "./models.js";
+import type { PiRunRecord, ResultParser } from "./models.js";
 import { type RunStore, utcNow } from "./persistence.js";
 import {
   AgentRunError,
@@ -33,22 +33,6 @@ export class HerdrRunner implements AgentRunner {
 
   async initializeTeam(): Promise<HerdrTeam> {
     return this.herdr.initialize(initialAgents(this.config).map((agent) => this.spec(agent, this.repoRoot)));
-  }
-
-  async presentToPlanner(result: RunResult | Error): Promise<void> {
-    const planner = agentForRole(this.config, "planner");
-    const message = result instanceof Error
-      ? [
-          "The orchestration stopped with an error.",
-          `Error: ${result.message}`,
-          "Inspect the persisted .orchestrator state, explain the blocker, and show the next recovery command.",
-        ].join("\n")
-      : [
-          "The orchestration lifecycle has finished.",
-          formatJson(result),
-          "Present the final goal status concisely. Distinguish completed, blocked, and failed outcomes.",
-        ].join("\n");
-    await this.herdr.present(this.spec(planner, this.repoRoot), message, this.timeoutMs);
   }
 
   async run<T>(request: AgentRunRequest<T>): Promise<[T, PiRunArtifact]> {

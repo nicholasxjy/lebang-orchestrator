@@ -92,20 +92,19 @@ can override it by creating its own `.orchestrator/config.json`; an explicit
 
 ## Quick start: Herdr team
 
-Run this command from a Herdr-managed pane in the target repository:
+Start the configured team from a Herdr-managed pane in the target repository:
 
 ```bash
-orchestrator init "Add request retry support with tests and documentation"
+orchestrator init
 ```
 
 `init` creates a dedicated tab with visible named panes for `lebang`,
 `westbrook`, `curry`, `duncan`, and up to `maxWorkers` coders. Every pane starts
-the configured Pi model and role Skill. `lebang` writes the plan, the
-orchestrator dispatches each lifecycle handoff through Herdr, and the final
-status is presented in and focused back to the `lebang` pane. A coder selected
-later by the plan is started lazily.
+in interactive text mode with the configured Pi model, role Skill, and tool
+policy. `init` does not send a prompt to any agent. A coder selected later by
+the plan is started lazily.
 
-The stepwise commands remain available for inspection and recovery:
+Send the goal to the planner, inspect the plan, and then run it:
 
 ```bash
 # Ask lebang to create only the persisted task DAG.
@@ -158,12 +157,7 @@ pi
 Then enter:
 
 ```text
-/orchestrator init "Replace callback-based loading with async/await and preserve behavior"
-```
-
-Or use the stepwise interface:
-
-```text
+/orchestrator init
 /orchestrator plan "Replace callback-based loading with async/await and preserve behavior"
 /orchestrator graph
 /orchestrator status
@@ -248,7 +242,7 @@ owner are never run concurrently.
 
 | Command | Behavior | Model call |
 | --- | --- | --- |
-| `init <goal>` | Starts the visible Herdr team, plans the goal, runs the full lifecycle, and returns focus to lebang. | Yes |
+| `init` | Starts the configured agents in visible Herdr panes without prompting them. | No |
 | `plan <goal>` | Inspects the repository, creates and persists a validated DAG. Fails if a plan already exists. | Yes |
 | `run` | Runs ready tasks and automatically integrates after every active task is approved. | Yes |
 | `status` | Prints run state, task owners, branches, dependencies, review counts, and the latest blocker. | No |
@@ -474,11 +468,12 @@ approved, `duncan` integrates task commits on an isolated
 `orchestrator/<run>/integration` branch. The user's current branch is not
 modified.
 
-Each visible pane uses the configured model/thinking suffix, a strict role tool
-allowlist, and only the current role Skill. Extension discovery is disabled in
-child sessions to prevent recursive loading. Role prompts carry the task
-worktree explicitly, and Herdr keeps the agent conversation visible while the
-orchestrator persists the structured handoff.
+Each visible pane starts in Pi's interactive text mode and uses the configured
+model/thinking suffix, a strict role tool allowlist, and only the current role
+Skill. Extension discovery is disabled in child sessions to prevent recursive
+loading. `plan` sends the plan prompt to the configured planner pane; later role
+prompts carry the task worktree explicitly, and Herdr keeps the agent
+conversation visible while the orchestrator persists the structured handoff.
 
 ## Persistence and recovery
 

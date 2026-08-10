@@ -38,11 +38,6 @@ export class OrchestratorEngine {
             throw new EngineError("init requires herdr.enabled=true");
         return this.herdrRunner.initializeTeam();
     }
-    async presentToPlanner(result) {
-        if (!this.herdrRunner)
-            throw new EngineError("planner presentation requires Herdr");
-        await this.herdrRunner.presentToPlanner(result);
-    }
     async planGoal(goal) {
         if (!goal.trim())
             throw new EngineError("goal must not be empty");

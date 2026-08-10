@@ -108,32 +108,6 @@ export class HerdrAdapter {
     return responseText(read.stdout);
   }
 
-  async present(spec: HerdrAgentSpec, message: string, timeoutMs: number): Promise<void> {
-    this.assertSession();
-    await this.ensureAgent(spec);
-    await this.run(
-      [
-        this.command,
-        "agent",
-        "prompt",
-        spec.agent.identity,
-        message,
-        "--wait",
-        "--timeout",
-        String(timeoutMs),
-      ],
-      spec.cwd,
-      timeoutMs + 5_000,
-      `present to ${spec.agent.identity}`,
-    );
-    await this.run(
-      [this.command, "agent", "focus", spec.agent.identity],
-      spec.cwd,
-      30_000,
-      `focus ${spec.agent.identity}`,
-    );
-  }
-
   private assertSession(): void {
     if (!this.enabled) {
       throw new HerdrError("Herdr is disabled in the orchestrator configuration");
@@ -250,6 +224,8 @@ export class HerdrAdapter {
         "--pane",
         paneId,
         "--",
+        "--mode",
+        "text",
         "--model",
         spec.agent.model,
         "--skill",

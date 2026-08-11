@@ -1,4 +1,0 @@
-interface:
-  display_name: "Tester"
-  short_description: "Independently test task acceptance criteria"
-  default_prompt: "Use $tester to independently test this completed task."

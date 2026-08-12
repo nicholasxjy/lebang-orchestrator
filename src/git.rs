@@ -76,6 +76,7 @@ impl GitManager {
         {
             let _guard = self.worktree_lock.lock().await;
             tokio::fs::create_dir_all(&self.worktrees_root).await?;
+            self.remove_prunable_worktree_registration(&path).await?;
             if path.exists() {
                 return Err(GitError::Invalid(format!(
                     "worktree path already exists but is not recoverable: {}",
@@ -83,6 +84,10 @@ impl GitManager {
                 )));
             }
             if self.branch_exists(&branch).await? {
+                if task.branch.is_none() && task.worktree.is_none() {
+                    self.align_unrecorded_branch(&branch, orchestration_base)
+                        .await?;
+                }
                 self.git(
                     vec![
                         "worktree".into(),
@@ -195,6 +200,7 @@ impl GitManager {
         {
             let _guard = self.worktree_lock.lock().await;
             tokio::fs::create_dir_all(&self.worktrees_root).await?;
+            self.remove_prunable_worktree_registration(&path).await?;
             if path.exists() {
                 self.verify_worktree(&path, &branch).await?;
             } else if self.branch_exists(&branch).await? {
@@ -302,6 +308,39 @@ impl GitManager {
         Ok(())
     }
 
+    async fn remove_prunable_worktree_registration(&self, path: &Path) -> Result<(), GitError> {
+        if path.exists() {
+            return Ok(());
+        }
+        let target = normalized_missing_path(path);
+        let registrations = self
+            .git(["worktree", "list", "--porcelain"], &self.repo_root)
+            .await?;
+        let prunable = registrations.split("\n\n").any(|registration| {
+            registration
+                .lines()
+                .next()
+                .and_then(|line| line.strip_prefix("worktree "))
+                .is_some_and(|registered| normalized_missing_path(Path::new(registered)) == target)
+                && registration
+                    .lines()
+                    .any(|line| line.starts_with("prunable"))
+        });
+        if prunable {
+            self.git(
+                vec![
+                    "worktree".into(),
+                    "remove".into(),
+                    "--force".into(),
+                    path_string(path),
+                ],
+                &self.repo_root,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn branch_exists(&self, branch: &str) -> Result<bool, GitError> {
         let result = self
             .run_git(
@@ -315,6 +354,40 @@ impl GitManager {
             )
             .await?;
         Ok(result.0 == 0)
+    }
+
+    async fn align_unrecorded_branch(
+        &self,
+        branch: &str,
+        orchestration_base: &str,
+    ) -> Result<(), GitError> {
+        let branch_head = self.git(["rev-parse", branch], &self.repo_root).await?;
+        let ancestor = self
+            .run_git(
+                ["merge-base", "--is-ancestor", branch, orchestration_base],
+                &self.repo_root,
+            )
+            .await?;
+        if ancestor.0 != 0 {
+            let archive = format!("archive/{branch}/{branch_head}");
+            if self.branch_exists(&archive).await? {
+                let archived_head = self.git(["rev-parse", &archive], &self.repo_root).await?;
+                if archived_head != branch_head {
+                    return Err(GitError::Invalid(format!(
+                        "archive branch {archive} points to {archived_head}, expected {branch_head}"
+                    )));
+                }
+            } else {
+                self.git(["branch", &archive, &branch_head], &self.repo_root)
+                    .await?;
+            }
+        }
+        self.git(
+            ["branch", "--force", branch, orchestration_base],
+            &self.repo_root,
+        )
+        .await?;
+        Ok(())
     }
 
     async fn git<I, S>(&self, args: I, cwd: &Path) -> Result<String, GitError>
@@ -526,4 +599,13 @@ fn absolute(path: &Path) -> PathBuf {
             .expect("current directory")
             .join(path)
     }
+}
+
+fn normalized_missing_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| {
+        path.parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .and_then(|parent| path.file_name().map(|name| parent.join(name)))
+            .unwrap_or_else(|| absolute(path))
+    })
 }

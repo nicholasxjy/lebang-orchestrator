@@ -6,14 +6,13 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures::future::try_join_all;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::{process::Command, sync::Mutex, time::timeout};
 
 use crate::{
-    config::{AgentConfig, AgentMode, Config, Role},
+    config::{AgentConfig, Config, Role},
     store::RunStore,
 };
 
@@ -210,9 +209,9 @@ impl HerdrRuntime {
             }
         }
 
-        let agent_root = self.split_pane(&coordinator_pane, "right", 80).await?;
+        let agent_root = self.split_pane(&coordinator_pane, "right", 0.2).await?;
         created.push(agent_root.clone());
-        let lower_root = self.split_pane(&agent_root, "down", 50).await?;
+        let lower_root = self.split_pane(&agent_root, "down", 0.5).await?;
         created.push(lower_root.clone());
 
         let mut upper = vec![self.agent_for(Role::Planner)?.clone()];
@@ -235,14 +234,11 @@ impl HerdrRuntime {
             .chain(lower.into_iter().zip(lower_panes))
             .collect::<Vec<_>>();
 
-        try_join_all(assignments.iter().map(|(agent, pane)| async move {
-            tokio::try_join!(
-                self.rename_pane(pane, &agent.identity),
-                self.start_agent(agent, pane, &self.repo_root)
-            )?;
-            self.calibrate(agent, pane).await
-        }))
-        .await?;
+        for (agent, pane) in &assignments {
+            self.rename_pane(pane, &agent.identity).await?;
+            self.start_agent(agent, pane, &self.repo_root).await?;
+            self.calibrate(agent, pane).await?;
+        }
 
         let agents = assignments
             .into_iter()
@@ -317,8 +313,8 @@ impl HerdrRuntime {
         let mut panes = vec![root.to_owned()];
         let mut remaining = root.to_owned();
         for slots in (2..=count).rev() {
-            let percent = ((slots - 1) * 100 + slots / 2) / slots;
-            let next = self.split_pane(&remaining, "right", percent).await?;
+            let ratio = 1.0 / slots as f32;
+            let next = self.split_pane(&remaining, "right", ratio).await?;
             created.push(next.clone());
             panes.push(next.clone());
             remaining = next;
@@ -330,7 +326,7 @@ impl HerdrRuntime {
         &self,
         pane: &str,
         direction: &str,
-        percent: usize,
+        ratio: f32,
     ) -> Result<String, RuntimeError> {
         let output = self
             .run_checked(
@@ -341,8 +337,8 @@ impl HerdrRuntime {
                     pane.into(),
                     "--direction".into(),
                     direction.into(),
-                    "--percent".into(),
-                    percent.to_string(),
+                    "--ratio".into(),
+                    ratio.to_string(),
                     "--cwd".into(),
                     path_string(&self.repo_root),
                     "--no-focus".into(),
@@ -375,7 +371,9 @@ impl HerdrRuntime {
     ) -> Result<(), RuntimeError> {
         let args = self.start_arguments(agent, pane, cwd)?;
         for attempt in 1..=40 {
-            let output = self.run(args.clone(), cwd, Duration::from_secs(60)).await?;
+            let output = self
+                .run(args.clone(), cwd, Duration::from_secs(125))
+                .await?;
             if output.code == 0 {
                 return Ok(());
             }
@@ -400,7 +398,7 @@ impl HerdrRuntime {
             Role::Planner | Role::Reviewer | Role::Integrator => "read-only",
         };
         let instructions = self.developer_instructions(agent)?;
-        Ok(vec![
+        let mut args = vec![
             "agent".into(),
             "start".into(),
             agent.identity.clone(),
@@ -408,6 +406,8 @@ impl HerdrRuntime {
             "codex".into(),
             "--pane".into(),
             pane.into(),
+            "--timeout".into(),
+            "120000".into(),
             "--".into(),
             "--model".into(),
             agent.model.clone(),
@@ -416,6 +416,14 @@ impl HerdrRuntime {
             "--no-alt-screen".into(),
             "--sandbox".into(),
             sandbox.into(),
+        ];
+        if matches!(agent.role, Role::Coder | Role::Tester) {
+            args.extend([
+                "--add-dir".into(),
+                path_string(&self.repo_root.join(".git")),
+            ]);
+        }
+        args.extend([
             "--ask-for-approval".into(),
             "never".into(),
             "-c".into(),
@@ -430,7 +438,8 @@ impl HerdrRuntime {
             ),
             "-c".into(),
             format!("developer_instructions={}", toml_string(&instructions)),
-        ])
+        ]);
+        Ok(args)
     }
 
     fn developer_instructions(&self, agent: &AgentConfig) -> Result<String, RuntimeError> {
@@ -443,9 +452,10 @@ impl HerdrRuntime {
             .collect::<Vec<_>>()
             .join(", ");
         Ok(format!(
-            "You are {}. Your orchestration role is {}. The fixed team roster is: {}. Follow this role Skill:\n\n{}",
+            "You are {}. Your orchestration role is {}. Operate in {} mode. The fixed team roster is: {}. Follow this role Skill:\n\n{}",
             agent.identity,
             agent.role.as_str(),
+            agent.mode.as_str(),
             roster,
             skill
         ))
@@ -462,30 +472,7 @@ impl HerdrRuntime {
     }
 
     async fn calibrate(&self, agent: &AgentConfig, pane: &str) -> Result<(), RuntimeError> {
-        let mut footer = self.read_footer(pane).await?;
-        let desired_plan = agent.mode == AgentMode::Plan;
-        if footer_is_plan(&footer) != desired_plan {
-            self.run_checked(
-                vec![
-                    "agent".into(),
-                    "send-keys".into(),
-                    agent.identity.clone(),
-                    "shift+tab".into(),
-                ],
-                &self.repo_root,
-                Duration::from_secs(30),
-                &format!("calibrate mode for {}", agent.identity),
-            )
-            .await?;
-            footer = self.read_footer(pane).await?;
-        }
-        if footer_is_plan(&footer) != desired_plan {
-            return Err(RuntimeError::Invalid(format!(
-                "Codex footer for {} did not enter {} mode: {footer}",
-                agent.identity,
-                agent.mode.as_str()
-            )));
-        }
+        let footer = self.read_footer(pane).await?;
         let lower = footer.to_lowercase();
         if !lower.contains(&agent.model.to_lowercase()) {
             return Err(RuntimeError::Invalid(format!(
@@ -686,7 +673,7 @@ impl AgentRuntime for HerdrRuntime {
         self.rebind_if_needed(&request.agent, &pane, &request.cwd)
             .await?;
         let transport = format!(
-            "{}\n\nHerdr result transport:\nEnd the response with {}_BEGIN on its own line, then one compact JSON object on one line, then {}_END on its own line.\nDo not place any text after the end marker.",
+            "{}\n\nHerdr result transport:\nEnd the response with {}_BEGIN on its own line, then one compact JSON object on one line, then {}_END on its own line. Return exactly the keys defined by resultContract and no additional top-level keys. The JSON must be syntactically valid; JSON-escape every quote and backslash inside string values.\nDo not place any text after the end marker.",
             request.prompt, request.marker, request.marker
         );
         self.run_checked(
@@ -728,6 +715,10 @@ pub fn parse_marked_result<T: DeserializeOwned>(
     transcript: &str,
     marker: &str,
 ) -> Result<T, RuntimeError> {
+    let transcript = transcript
+        .lines()
+        .map(|line| line.strip_prefix("  ").unwrap_or(line))
+        .collect::<String>();
     let begin = format!("{marker}_BEGIN");
     let end = format!("{marker}_END");
     let mut offset = 0;
@@ -738,7 +729,8 @@ pub fn parse_marked_result<T: DeserializeOwned>(
             break;
         };
         let finish = start + relative_end;
-        if let Ok(value) = serde_json::from_str(transcript[start..finish].trim()) {
+        let candidate = transcript[start..finish].trim();
+        if let Ok(value) = serde_json::from_str(candidate) {
             last = Some(value);
         }
         offset = finish + end.len();
@@ -822,13 +814,21 @@ fn response_error_code(output: &str) -> Option<String> {
         .and_then(|value| find_string(&value, &["code"]))
 }
 
-fn footer_is_plan(footer: &str) -> bool {
-    let lower = footer.to_lowercase();
-    lower.contains("plan mode") || lower.contains("mode: plan")
-}
-
 fn toml_string(value: &str) -> String {
-    toml::Value::String(value.to_owned()).to_string()
+    let mut encoded = String::with_capacity(value.len() + 2);
+    encoded.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => encoded.push_str("\\\""),
+            '\\' => encoded.push_str("\\\\"),
+            character if character.is_control() => {
+                encoded.push_str(&format!("\\u{:04X}", character as u32));
+            }
+            character => encoded.push(character),
+        }
+    }
+    encoded.push('"');
+    encoded
 }
 
 fn builtin_skill(name: &str) -> Option<&'static str> {
@@ -854,4 +854,19 @@ fn absolute(path: &Path) -> PathBuf {
 
 fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::toml_string;
+
+    #[test]
+    fn toml_string_round_trips_without_literal_control_characters() {
+        let original = "first line\nsecond\tline\r\u{007f}";
+        let encoded = toml_string(original);
+
+        assert!(!encoded.chars().any(char::is_control));
+        let parsed = toml::from_str::<toml::Table>(&format!("value = {encoded}")).unwrap();
+        assert_eq!(parsed["value"].as_str(), Some(original));
+    }
 }

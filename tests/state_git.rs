@@ -108,6 +108,73 @@ async fn git_worktrees_keep_dependency_commits_out_of_the_local_range() {
     assert!(!is_test_support_path("src/feature.rs"));
 }
 
+#[tokio::test]
+async fn task_worktree_recovers_a_missing_prunable_registration() {
+    let root = tempdir().unwrap();
+    init_repo(root.path());
+    let base = git(root.path(), &["rev-parse", "HEAD"]);
+    let manager = GitManager::new(root.path(), root.path().join(".worktrees"));
+    let mut first = task("T1");
+    let snapshot = first.clone();
+    let path = manager
+        .prepare_task_worktree(&mut first, &[snapshot], &base)
+        .await
+        .unwrap();
+    fs::write(root.path().join("next.txt"), "next\n").unwrap();
+    git(root.path(), &["add", "next.txt"]);
+    git(root.path(), &["commit", "-m", "next"]);
+    let next_base = git(root.path(), &["rev-parse", "HEAD"]);
+    fs::remove_dir_all(&path).unwrap();
+
+    let mut retry = task("T1");
+    let snapshot = retry.clone();
+    let recovered = manager
+        .prepare_task_worktree(&mut retry, &[snapshot], &next_base)
+        .await
+        .unwrap();
+
+    assert_eq!(recovered, path);
+    assert_eq!(retry.branch.as_deref(), Some("agent/kd/T1"));
+    assert_eq!(retry.base_commit.as_deref(), Some(next_base.as_str()));
+    assert_eq!(git(&recovered, &["rev-parse", "HEAD"]), next_base);
+    assert!(recovered.is_dir());
+}
+
+#[tokio::test]
+async fn task_worktree_archives_an_unrecorded_divergent_branch() {
+    let root = tempdir().unwrap();
+    init_repo(root.path());
+    let base = git(root.path(), &["rev-parse", "HEAD"]);
+    let manager = GitManager::new(root.path(), root.path().join(".worktrees"));
+    let mut first = task("T1");
+    let snapshot = first.clone();
+    let path = manager
+        .prepare_task_worktree(&mut first, &[snapshot], &base)
+        .await
+        .unwrap();
+    fs::write(path.join("old.txt"), "old task work\n").unwrap();
+    git(&path, &["add", "old.txt"]);
+    git(&path, &["commit", "-m", "old task work"]);
+    let old_commit = git(&path, &["rev-parse", "HEAD"]);
+    fs::remove_dir_all(&path).unwrap();
+
+    let mut retry = task("T1");
+    let snapshot = retry.clone();
+    let recovered = manager
+        .prepare_task_worktree(&mut retry, &[snapshot], &base)
+        .await
+        .unwrap();
+
+    assert_eq!(git(&recovered, &["rev-parse", "HEAD"]), base);
+    assert_eq!(
+        git(
+            root.path(),
+            &["rev-parse", &format!("archive/agent/kd/T1/{old_commit}")],
+        ),
+        old_commit
+    );
+}
+
 fn init_repo(path: &Path) {
     git(path, &["init", "-b", "main"]);
     git(path, &["config", "user.name", "Test User"]);

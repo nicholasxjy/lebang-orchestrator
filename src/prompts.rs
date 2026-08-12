@@ -80,15 +80,16 @@ pub fn coder_prompt(
             "dependencyResults": dependency_results,
             "reworkIssues": rework_issues,
             "requirements": [
-                "After committing, run git rev-parse HEAD and copy its full output exactly into commit; never expand an abbreviated hash."
+                "After committing, run git rev-parse HEAD and copy its full output exactly into commit; never expand an abbreviated hash.",
+                "changedFiles and testsAdded must contain repository-relative paths. testsAdded must list changed test files, never test case names. testsRun must contain the exact commands executed."
             ],
             "resultContract": {
                 "taskId": task.id,
                 "status": "completed | blocked | failed",
                 "summary": "...",
-                "changedFiles": [],
-                "testsAdded": [],
-                "testsRun": [],
+                "changedFiles": ["repository-relative changed file path"],
+                "testsAdded": ["repository-relative changed test file path"],
+                "testsRun": ["exact test command"],
                 "testResult": "passed | failed | not_run",
                 "commit": "commit hash or null",
                 "blockers": []
@@ -110,13 +111,18 @@ pub fn tester_prompt(goal: &str, task: &Task, coder: &CoderResult, diff: &str) -
                 "Use test scope only for missing regression, edge, or integration coverage; these return to the tester.",
                 "Use plan scope for decomposition, architecture, or cross-task defects; these return to the planner."
             ],
+            "requirements": [
+                "testsAdded must contain repository-relative paths for changed test files, never test case names. testsExecuted must contain the exact commands executed.",
+                "After committing test changes, run git rev-parse HEAD and copy its full output exactly into commit; never return an abbreviated hash.",
+                "Remove command-generated logs and other temporary artifacts before returning. Confirm git status --short is empty after any tester commit."
+            ],
             "resultContract": {
                 "taskId": task.id,
                 "status": "passed | failed | blocked",
-                "testsExecuted": [],
-                "testsAdded": [],
+                "testsExecuted": ["exact test command"],
+                "testsAdded": ["repository-relative changed test file path"],
                 "failures": [{"description": "...", "reproduction": "...", "ownerTaskId": task.id}],
-                "commit": "tester commit or null"
+                "commit": "full tester commit hash or null"
             }
         }),
     )
@@ -160,6 +166,10 @@ pub fn integrator_prompt(
             "integratedCommits": integrated_commits,
             "integrationBranch": integration_branch,
             "validationEvidence": validations,
+            "requirements": [
+                "Copy integratedCommits and validationEvidence exactly into the corresponding result fields, preserving order and contents.",
+                "Validation commands have already been executed by the orchestrator. Do not add independently executed commands to validations."
+            ],
             "resultContract": {
                 "status": "completed | blocked | failed",
                 "summary": "...",

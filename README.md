@@ -145,7 +145,7 @@ herdr agent prompt kd "report current task state" --wait
 
 The normalized roster and pane IDs are saved in `.orchestrator/herdr-layout.json`. A retry in the same repository and tab can reuse a complete matching layout. A live same-name agent in another repository, tab, pane, or incompatible roster is reported as a conflict. If bootstrap fails, only panes created by that attempt are closed. Once the complete team is recorded, planner or later failures leave the team open for inspection and retry.
 
-Codex footer state is checked after startup. `shift+tab` is sent when plan/build mode needs calibration, then model, thinking, and mode are checked again. When a task moves an identity to a task or integration worktree, `lebang` exits Codex with `/quit` and starts it again in the same named pane with the new `--cd`. Per-identity async locks allow different coders to run concurrently while preventing one tester, reviewer, or other identity from receiving overlapping prompts or changing cwd mid-turn.
+Agents are started one at a time, and each start gives Herdr 120 seconds to detect Codex readiness. Codex model and thinking state are then checked in the footer. Plan/build behavior is passed through developer instructions because current Codex versions no longer expose the collaboration-mode toggle. Coder and tester sessions also receive the repository `.git` directory through Codex `--add-dir`, allowing commits from linked task worktrees without granting write access to the main checkout. When a task moves an identity to a task or integration worktree, `lebang` exits Codex with `/quit` and starts it again in the same named pane with the new `--cd`. Per-identity async locks allow different coders to run concurrently while preventing one tester, reviewer, or other identity from receiving overlapping prompts or changing cwd mid-turn.
 
 ## Lifecycle and worktrees
 
@@ -165,6 +165,8 @@ Coder branches and worktrees use:
 branch:   agent/<identity>/<task-id>
 worktree: .worktrees/<task-id>-<identity>
 ```
+
+If a generated worktree directory was removed outside Lebang, its exact prunable Git registration is removed before recreation. An unrecorded generated branch is fast-forwarded when safe; divergent commits are preserved under `archive/agent/<identity>/<task-id>/<commit>` before the task branch is reset to the current orchestration base.
 
 Dependencies are cherry-picked into a dependent task before its local `baseCommit` is recorded. This keeps `baseCommit..commit` limited to that task's own commits. Tester commits may contain only declared test-support paths. Integration uses:
 

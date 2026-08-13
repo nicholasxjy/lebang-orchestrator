@@ -1,14 +1,46 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
+use async_trait::async_trait;
 use lebang_orchestrator::{
     config::{Config, DEFAULT_CONFIG},
     model::{CoderResult, Plan, ReviewResult, ReviewStatus, Task, ValidationResult},
     prompts::{coder_prompt, integrator_prompt, planner_prompt, tester_prompt},
     runner::{AgentRunRequest, AgentRunner},
-    runtime::RecordingRuntime,
+    runtime::{AgentInvocation, AgentRuntime, HerdrLayout, RecordingRuntime, RuntimeError},
     store::RunStore,
 };
 use tempfile::tempdir;
+use tokio::sync::Mutex;
+
+struct MissingMarkerRuntime {
+    invocations: Mutex<Vec<AgentInvocation>>,
+}
+
+#[async_trait]
+impl AgentRuntime for MissingMarkerRuntime {
+    async fn bootstrap(&self) -> Result<HerdrLayout, RuntimeError> {
+        Ok(HerdrLayout {
+            version: 1,
+            repo_root: "/recording".into(),
+            tab_id: "w1:t1".into(),
+            coordinator_pane: "w1:p1".into(),
+            agents: BTreeMap::new(),
+            roster: Vec::new(),
+        })
+    }
+
+    async fn invoke(&self, request: AgentInvocation) -> Result<String, RuntimeError> {
+        let mut invocations = self.invocations.lock().await;
+        invocations.push(request.clone());
+        if invocations.len() == 1 {
+            return Ok("task completed, but the result marker was omitted".into());
+        }
+        Ok(format!(
+            "{}_BEGIN\n{{\"taskId\":\"T1\",\"status\":\"approved\",\"issues\":[]}}\n{}_END",
+            request.marker, request.marker
+        ))
+    }
+}
 
 #[tokio::test]
 async fn runner_persists_marked_results_and_prompt_context() {
@@ -43,6 +75,68 @@ async fn runner_persists_marked_results_and_prompt_context() {
             .prompt
             .contains("Review the task")
     );
+}
+
+#[tokio::test]
+async fn runner_resumes_the_agent_session_after_a_failed_attempt() {
+    let root = tempdir().unwrap();
+    let store = RunStore::new(root.path().join(".orchestrator"));
+    let runtime = Arc::new(RecordingRuntime::new([]));
+    runtime.push_error("agent stopped").await;
+    runtime
+        .push(serde_json::json!({
+            "taskId": "T1", "status": "approved", "issues": []
+        }))
+        .await;
+    let config = Config::parse(DEFAULT_CONFIG).unwrap();
+    let reviewer = config.agent_for_role("reviewer").unwrap().clone();
+    let runner = AgentRunner::new(root.path(), store, runtime.clone());
+    let request = || AgentRunRequest {
+        agent: reviewer.clone(),
+        task_id: "T1".into(),
+        cwd: root.path().into(),
+        prompt: "Review the task".into(),
+        state_transition: Some("reviewing -> approved".into()),
+    };
+
+    runner.run::<ReviewResult>(request()).await.unwrap_err();
+    runner.run::<ReviewResult>(request()).await.unwrap();
+
+    let invocations = runtime.invocations().await;
+    assert!(!invocations[0].resume_session);
+    assert!(invocations[1].resume_session);
+}
+
+#[tokio::test]
+async fn marked_result_retry_only_asks_the_session_to_resend_its_result() {
+    let root = tempdir().unwrap();
+    let store = RunStore::new(root.path().join(".orchestrator"));
+    let runtime = Arc::new(MissingMarkerRuntime {
+        invocations: Mutex::new(Vec::new()),
+    });
+    let config = Config::parse(DEFAULT_CONFIG).unwrap();
+    let reviewer = config.agent_for_role("reviewer").unwrap().clone();
+    let runner = AgentRunner::new(root.path(), store, runtime.clone());
+    let request = || AgentRunRequest {
+        agent: reviewer.clone(),
+        task_id: "T1".into(),
+        cwd: root.path().into(),
+        prompt: "Review the task from the beginning".into(),
+        state_transition: Some("reviewing -> approved".into()),
+    };
+
+    let error = runner.run::<ReviewResult>(request()).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Herdr transcript did not contain a valid marked result")
+    );
+    runner.run::<ReviewResult>(request()).await.unwrap();
+
+    let invocations = runtime.invocations.lock().await;
+    assert!(invocations[1].resume_session);
+    assert!(invocations[1].prompt.contains("Do not repeat the task"));
+    assert!(!invocations[1].prompt.contains("from the beginning"));
 }
 
 #[test]

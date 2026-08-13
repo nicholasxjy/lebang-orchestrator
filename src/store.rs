@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::model::{Plan, RunState, RunStatus, StructuredResult, Task, TaskStatus};
+use crate::model::{AgentRunRecord, Plan, RunState, RunStatus, StructuredResult, Task, TaskStatus};
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -235,6 +235,47 @@ impl RunStore {
         task_id: &str,
         role: &str,
     ) -> Result<Option<T>, StoreError> {
+        let Some(path) = self.latest_run_path(task_id, role)? else {
+            return Ok(None);
+        };
+        let record: Value = self.read_json(&path)?;
+        if record.get("exitCode").and_then(Value::as_i64) != Some(0) {
+            return Ok(None);
+        }
+        let value =
+            record
+                .get("structuredResult")
+                .cloned()
+                .ok_or_else(|| StoreError::InvalidJson {
+                    path: path.display().to_string(),
+                    detail: "run record has no structured result".into(),
+                })?;
+        let result: T = serde_json::from_value(value).map_err(|error| StoreError::InvalidJson {
+            path: path.display().to_string(),
+            detail: error.to_string(),
+        })?;
+        result.validate_result()?;
+        Ok(Some(result))
+    }
+
+    pub fn latest_failed_run(
+        &self,
+        task_id: &str,
+        role: &str,
+        agent: &str,
+    ) -> Result<Option<AgentRunRecord>, StoreError> {
+        let Some(path) = self.latest_run_path(task_id, role)? else {
+            return Ok(None);
+        };
+        let record: AgentRunRecord = self.read_json(&path)?;
+        if record.agent == agent && record.exit_code != 0 {
+            Ok(Some(record))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn latest_run_path(&self, task_id: &str, role: &str) -> Result<Option<PathBuf>, StoreError> {
         let directory = self.runs_dir.join(task_id).join(role);
         if !directory.exists() {
             return Ok(None);
@@ -258,27 +299,7 @@ impl RunStore {
                 .cmp(&modified(left))
                 .then_with(|| right.cmp(left))
         });
-        let Some(path) = paths.first() else {
-            return Ok(None);
-        };
-        let record: Value = self.read_json(path)?;
-        if record.get("exitCode").and_then(Value::as_i64) != Some(0) {
-            return Ok(None);
-        }
-        let value =
-            record
-                .get("structuredResult")
-                .cloned()
-                .ok_or_else(|| StoreError::InvalidJson {
-                    path: path.display().to_string(),
-                    detail: "run record has no structured result".into(),
-                })?;
-        let result: T = serde_json::from_value(value).map_err(|error| StoreError::InvalidJson {
-            path: path.display().to_string(),
-            detail: error.to_string(),
-        })?;
-        result.validate_result()?;
-        Ok(Some(result))
+        Ok(paths.into_iter().next())
     }
 
     pub fn write_log(&self, name: &str, content: &str) -> Result<PathBuf, StoreError> {

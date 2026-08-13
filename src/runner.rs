@@ -7,7 +7,9 @@ use uuid::Uuid;
 use crate::{
     config::AgentConfig,
     model::{AgentRunRecord, StructuredResult},
-    runtime::{AgentInvocation, AgentRuntime, RuntimeError, parse_marked_result},
+    runtime::{
+        AgentInvocation, AgentRuntime, MISSING_MARKED_RESULT, RuntimeError, parse_marked_result,
+    },
     store::{RunStore, StoreError, utc_now},
 };
 
@@ -68,6 +70,20 @@ impl AgentRunner {
         &self,
         request: AgentRunRequest,
     ) -> Result<(T, AgentRunArtifact), RunnerError> {
+        let failed_run = self.store.latest_failed_run(
+            &request.task_id,
+            request.agent.role.as_str(),
+            &request.agent.identity,
+        )?;
+        let resume_session = failed_run.is_some();
+        let prompt = if failed_run
+            .as_ref()
+            .is_some_and(|record| record.stderr.contains(MISSING_MARKED_RESULT))
+        {
+            marked_result_recovery_prompt()
+        } else {
+            request.prompt
+        };
         let run_id = Uuid::new_v4().simple().to_string();
         let marker = format!("LEBANG_RESULT_{}", run_id.to_uppercase());
         let start_time = utc_now();
@@ -78,9 +94,10 @@ impl AgentRunner {
             .invoke(AgentInvocation {
                 agent: request.agent.clone(),
                 cwd: request.cwd.clone(),
-                prompt: request.prompt,
+                prompt,
                 marker: marker.clone(),
                 timeout: self.timeout,
+                resume_session,
             })
             .await
         {
@@ -151,6 +168,11 @@ impl AgentRunner {
             }),
         }
     }
+}
+
+fn marked_result_recovery_prompt() -> String {
+    "The previous task attempt already ran, but its structured result could not be parsed. Do not repeat the task or redo completed work. Continue only if the prior work was incomplete, then return the same JSON result contract requested in the previous prompt using the new Herdr result transport appended below."
+        .into()
 }
 
 fn format_log(record: &AgentRunRecord) -> String {

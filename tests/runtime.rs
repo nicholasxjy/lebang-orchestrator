@@ -235,6 +235,19 @@ fi
             prompt: "first".into(),
             marker: "FIRST".into(),
             timeout: Duration::from_secs(1),
+            resume_session: false,
+        })
+        .await
+        .unwrap();
+    fs::remove_file(state.join("agent-cwd-curry")).unwrap();
+    runtime
+        .invoke(AgentInvocation {
+            agent: reviewer.clone(),
+            cwd: worktree.clone(),
+            prompt: "resume".into(),
+            marker: "RESUME".into(),
+            timeout: Duration::from_secs(1),
+            resume_session: true,
         })
         .await
         .unwrap();
@@ -244,6 +257,7 @@ fi
         prompt: marker.into(),
         marker: marker.into(),
         timeout: Duration::from_secs(1),
+        resume_session: false,
     };
     let (left, right) = tokio::join!(
         runtime.invoke(request("LEFT")),
@@ -255,6 +269,11 @@ fi
     let commands = fs::read_to_string(&log).unwrap();
     assert!(commands.contains("agent prompt curry /quit"));
     assert!(commands.contains(&format!("--cd {}", worktree.display())));
+    assert!(commands.lines().any(|line| {
+        line.starts_with("agent start curry ")
+            && line.contains(" -- resume --last ")
+            && line.contains(&format!("--cd {}", worktree.display()))
+    }));
     assert!(commands.contains("JSON-escape every quote and backslash"));
     assert!(commands.contains("Return exactly the keys defined by resultContract"));
     assert!(!state.join("concurrent-curry").exists());

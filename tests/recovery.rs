@@ -1,14 +1,140 @@
-use std::{fs, path::Path, process::Command, sync::Arc};
+use std::{collections::BTreeMap, fs, path::Path, process::Command, sync::Arc};
 
+use async_trait::async_trait;
 use lebang_orchestrator::{
-    config::{Config, DEFAULT_CONFIG},
+    config::{Config, DEFAULT_CONFIG, Role},
     git::GitManager,
     model::{AgentRunRecord, LifecycleResultStatus, Plan, Risk, Task, TaskStatus, TaskType},
     orchestrator::Orchestrator,
-    runtime::RecordingRuntime,
+    runtime::{AgentInvocation, AgentRuntime, HerdrLayout, RecordingRuntime, RuntimeError},
     store::{RunStore, utc_now},
 };
 use tempfile::tempdir;
+use tokio::sync::Mutex;
+
+struct MissingCoderMarkerRuntime {
+    invocations: Mutex<Vec<AgentInvocation>>,
+}
+
+#[async_trait]
+impl AgentRuntime for MissingCoderMarkerRuntime {
+    async fn bootstrap(&self) -> Result<HerdrLayout, RuntimeError> {
+        Ok(HerdrLayout {
+            version: 1,
+            repo_root: "/recording".into(),
+            tab_id: "w1:t1".into(),
+            coordinator_pane: "w1:p1".into(),
+            agents: BTreeMap::new(),
+            roster: Vec::new(),
+        })
+    }
+
+    async fn invoke(&self, request: AgentInvocation) -> Result<String, RuntimeError> {
+        let mut invocations = self.invocations.lock().await;
+        let coder_attempt = invocations
+            .iter()
+            .filter(|invocation| invocation.agent.role == Role::Coder)
+            .count();
+        invocations.push(request.clone());
+        let value = match request.agent.role {
+            Role::Coder if coder_attempt == 0 => {
+                fs::write(request.cwd.join("feature.txt"), "done\n")?;
+                fs::create_dir_all(request.cwd.join("tests"))?;
+                fs::write(request.cwd.join("tests/feature.txt"), "covered\n")?;
+                git(&request.cwd, &["add", "feature.txt", "tests/feature.txt"]);
+                git(&request.cwd, &["commit", "-m", "T1"]);
+                return Ok("task completed without a marked result".into());
+            }
+            Role::Coder => {
+                let commit = git(&request.cwd, &["rev-parse", "HEAD"]);
+                serde_json::json!({
+                    "taskId": "T1", "status": "completed", "summary": "done",
+                    "changedFiles": ["feature.txt", "tests/feature.txt"],
+                    "testsAdded": ["tests/feature.txt"], "testsRun": ["test -f feature.txt"],
+                    "testResult": "passed", "commit": commit, "blockers": []
+                })
+            }
+            Role::Tester => serde_json::json!({
+                "taskId": "T1", "status": "passed", "testsExecuted": ["test -f feature.txt"],
+                "testsAdded": [], "failures": [], "commit": null
+            }),
+            Role::Reviewer => {
+                serde_json::json!({"taskId": "T1", "status": "approved", "issues": []})
+            }
+            Role::Integrator => {
+                let context: serde_json::Value =
+                    serde_json::from_str(request.prompt.split_once("Context:\n").unwrap().1)
+                        .unwrap();
+                serde_json::json!({
+                    "status": "completed", "summary": "recovered",
+                    "integratedCommits": context["integratedCommits"],
+                    "validations": context["validationEvidence"], "issues": []
+                })
+            }
+            Role::Planner => unreachable!(),
+        };
+        Ok(format!(
+            "{}_BEGIN\n{}\n{}_END",
+            request.marker,
+            serde_json::to_string(&value).unwrap(),
+            request.marker
+        ))
+    }
+}
+
+#[tokio::test]
+async fn retry_recovers_a_coder_result_after_the_marker_was_omitted() {
+    let root = tempdir().unwrap();
+    init_repo(root.path());
+    let base = git(root.path(), &["rev-parse", "HEAD"]);
+    let store = RunStore::new(root.path().join(".orchestrator"));
+    store
+        .initialize(&Plan {
+            goal: "Recover".into(),
+            base_commit: base.clone(),
+            tasks: vec![make_task()],
+        })
+        .unwrap();
+    let runtime = Arc::new(MissingCoderMarkerRuntime {
+        invocations: Mutex::new(Vec::new()),
+    });
+    let orchestrator = Orchestrator::new(
+        root.path(),
+        Config::parse(DEFAULT_CONFIG).unwrap(),
+        runtime.clone(),
+    );
+
+    let first = orchestrator.run().await.unwrap();
+    assert_eq!(first.status, LifecycleResultStatus::Failed);
+    assert_eq!(
+        orchestrator.store.load_plan().unwrap().tasks[0].status,
+        TaskStatus::Failed
+    );
+
+    orchestrator.retry("T1").await.unwrap();
+    let result = orchestrator.run().await.unwrap();
+
+    assert_eq!(result.status, LifecycleResultStatus::Completed);
+    let invocations = runtime.invocations.lock().await;
+    let coders = invocations
+        .iter()
+        .filter(|invocation| invocation.agent.role == Role::Coder)
+        .collect::<Vec<_>>();
+    assert_eq!(coders.len(), 2);
+    assert!(coders[1].resume_session);
+    assert!(coders[1].prompt.contains("Do not repeat the task"));
+    let worktree = orchestrator.store.load_plan().unwrap().tasks[0]
+        .worktree
+        .clone()
+        .unwrap();
+    assert_eq!(
+        git(
+            Path::new(&worktree),
+            &["rev-list", "--count", &format!("{base}..HEAD")]
+        ),
+        "1"
+    );
+}
 
 #[tokio::test]
 async fn resume_recovers_a_committed_coder_result_and_finishes() {

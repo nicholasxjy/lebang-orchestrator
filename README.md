@@ -143,7 +143,7 @@ herdr agent prompt lebang "summarize the plan" --wait
 herdr agent prompt kd "report current task state" --wait
 ```
 
-The normalized roster and pane IDs are saved in `.orchestrator/herdr-layout.json`. A retry in the same repository and tab can reuse a complete matching layout. A live same-name agent in another repository, tab, pane, or incompatible roster is reported as a conflict. If bootstrap fails, only panes created by that attempt are closed. Once the complete team is recorded, planner or later failures leave the team open for inspection and retry.
+The normalized roster and pane IDs are saved in `.orchestrator/herdr-layout.json`. A retry in the same repository and tab can reuse a complete matching layout. If a task agent exited after a failed execution, retry restarts it with its most recent Codex session in the same worktree so it can continue from the previous context. A live same-name agent in another repository, tab, pane, or incompatible roster is reported as a conflict. If bootstrap fails, only panes created by that attempt are closed. Once the complete team is recorded, planner or later failures leave the team open for inspection and retry.
 
 Agents are started one at a time, and each start gives Herdr 120 seconds to detect Codex readiness. Codex model and thinking state are then checked in the footer. Plan/build behavior is passed through developer instructions because current Codex versions no longer expose the collaboration-mode toggle. Coder and tester sessions also receive the repository `.git` directory through Codex `--add-dir`, allowing commits from linked task worktrees without granting write access to the main checkout. When a task moves an identity to a task or integration worktree, `lebang` exits Codex with `/quit` and starts it again in the same named pane with the new `--cd`. Per-identity async locks allow different coders to run concurrently while preventing one tester, reviewer, or other identity from receiving overlapping prompts or changing cwd mid-turn.
 
@@ -208,7 +208,7 @@ lebang resume
 lebang integrate
 ```
 
-`resume` detects work left during coding, testing, review, integration, or final validation. A clean committed coder result can be revalidated from its run record and continue at independent testing without redoing implementation.
+`resume` detects work left during coding, testing, review, integration, or final validation. A clean committed coder result can be revalidated from its run record and continue at independent testing without redoing implementation. If an agent completed its work but omitted a valid marked result, `retry` continues the same session and asks it only to resend the structured result with a fresh marker.
 
 ## Role Skills
 

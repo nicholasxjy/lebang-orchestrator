@@ -17,6 +17,8 @@ use crate::{
 };
 
 const LAYOUT_FILE: &str = "herdr-layout.json";
+pub(crate) const MISSING_MARKED_RESULT: &str =
+    "Herdr transcript did not contain a valid marked result";
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -49,6 +51,7 @@ pub struct AgentInvocation {
     pub prompt: String,
     pub marker: String,
     pub timeout: Duration,
+    pub resume_session: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -236,7 +239,8 @@ impl HerdrRuntime {
 
         for (agent, pane) in &assignments {
             self.rename_pane(pane, &agent.identity).await?;
-            self.start_agent(agent, pane, &self.repo_root).await?;
+            self.start_agent(agent, pane, &self.repo_root, false)
+                .await?;
             self.calibrate(agent, pane).await?;
         }
 
@@ -368,8 +372,9 @@ impl HerdrRuntime {
         agent: &AgentConfig,
         pane: &str,
         cwd: &Path,
+        resume: bool,
     ) -> Result<(), RuntimeError> {
-        let args = self.start_arguments(agent, pane, cwd)?;
+        let args = self.start_arguments(agent, pane, cwd, resume)?;
         for attempt in 1..=40 {
             let output = self
                 .run(args.clone(), cwd, Duration::from_secs(125))
@@ -392,6 +397,7 @@ impl HerdrRuntime {
         agent: &AgentConfig,
         pane: &str,
         cwd: &Path,
+        resume: bool,
     ) -> Result<Vec<String>, RuntimeError> {
         let sandbox = match agent.role {
             Role::Coder | Role::Tester => "workspace-write",
@@ -409,6 +415,11 @@ impl HerdrRuntime {
             "--timeout".into(),
             "120000".into(),
             "--".into(),
+        ];
+        if resume {
+            args.extend(["resume".into(), "--last".into()]);
+        }
+        args.extend([
             "--model".into(),
             agent.model.clone(),
             "--cd".into(),
@@ -416,7 +427,7 @@ impl HerdrRuntime {
             "--no-alt-screen".into(),
             "--sandbox".into(),
             sandbox.into(),
-        ];
+        ]);
         if matches!(agent.role, Role::Coder | Role::Tester) {
             args.extend([
                 "--add-dir".into(),
@@ -515,6 +526,7 @@ impl HerdrRuntime {
         agent: &AgentConfig,
         pane: &str,
         cwd: &Path,
+        resume_session: bool,
     ) -> Result<(), RuntimeError> {
         let existing = self
             .run(
@@ -549,7 +561,7 @@ impl HerdrRuntime {
                 )
                 .await?;
         }
-        self.start_agent(agent, pane, cwd).await?;
+        self.start_agent(agent, pane, cwd, resume_session).await?;
         self.calibrate(agent, pane).await
     }
 
@@ -670,7 +682,7 @@ impl AgentRuntime for HerdrRuntime {
             .clone();
         let lock = self.identity_lock(&request.agent.identity).await;
         let _guard = lock.lock().await;
-        self.rebind_if_needed(&request.agent, &pane, &request.cwd)
+        self.rebind_if_needed(&request.agent, &pane, &request.cwd, request.resume_session)
             .await?;
         let transport = format!(
             "{}\n\nHerdr result transport:\nEnd the response with {}_BEGIN on its own line, then one compact JSON object on one line, then {}_END on its own line. Return exactly the keys defined by resultContract and no additional top-level keys. The JSON must be syntactically valid; JSON-escape every quote and backslash inside string values.\nDo not place any text after the end marker.",
@@ -735,9 +747,7 @@ pub fn parse_marked_result<T: DeserializeOwned>(
         }
         offset = finish + end.len();
     }
-    last.ok_or_else(|| {
-        RuntimeError::Invalid("Herdr transcript did not contain a valid marked result".into())
-    })
+    last.ok_or_else(|| RuntimeError::Invalid(MISSING_MARKED_RESULT.into()))
 }
 
 #[derive(Debug)]

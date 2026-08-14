@@ -1,4 +1,0 @@
-interface:
-  display_name: "Planner"
-  short_description: "Decompose goals into an auditable task DAG"
-  default_prompt: "Use $planner to turn this repository goal into an executable task DAG."

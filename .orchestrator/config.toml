@@ -1,0 +1,52 @@
+# Review every agent's model, mode, and thinking setting before the first plan.
+# The model values below are examples, not a promise of account availability.
+max_workers = 1
+max_review_attempts = 3
+
+# Replace these with the repository's real final validation commands.
+validation_commands = [
+  ["git", "diff", "--check"],
+]
+
+[herdr]
+command = "herdr"
+
+[agents.lebang]
+role = "planner"
+agent = "codex"
+model = "gpt-5.6-sol"
+mode = "plan"
+thinking = "high"
+skill = "planner"
+
+[agents.kd]
+role = "coder"
+agent = "codex"
+model = "gpt-5.6-sol"
+mode = "build"
+thinking = "medium"
+skill = "coder"
+
+[agents.westbrook]
+role = "tester"
+agent = "codex"
+model = "gpt-5.6-sol"
+mode = "build"
+thinking = "medium"
+skill = "tester"
+
+[agents.curry]
+role = "reviewer"
+agent = "codex"
+model = "gpt-5.6-sol"
+mode = "build"
+thinking = "high"
+skill = "reviewer"
+
+[agents.duncan]
+role = "integrator"
+agent = "codex"
+model = "gpt-5.6-sol"
+mode = "build"
+thinking = "high"
+skill = "integrator"

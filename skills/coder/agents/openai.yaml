@@ -1,4 +1,0 @@
-interface:
-  display_name: "Coder"
-  short_description: "Implement one owned task in its worktree"
-  default_prompt: "Use $coder to implement and verify the assigned task in its worktree."

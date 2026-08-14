@@ -1,6 +1,6 @@
 .orchestrator/*
-!.orchestrator/config.json
+!.orchestrator/config.toml
 .worktrees/
+target/
 node_modules/
 coverage/
-*.tgz

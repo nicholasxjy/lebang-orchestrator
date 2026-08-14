@@ -1,97 +1,75 @@
 # Design
 
-## Source of truth
+## Goal
 
-- Status: Active
-- Last refreshed: 2026-08-09
-- Primary product surfaces: standalone `orchestrator` CLI and Pi's `/orchestrator` command
-- Evidence reviewed: `README.md`, `Plan.md`, `src/extension.ts`, `src/commands.ts`, and Pi 0.84.1 extension/TUI documentation
+`lebang` is a small, observable orchestrator for one fixed class of workflow: a Codex team in Herdr working through Git-isolated tasks. It deliberately is not a generic agent framework, provider abstraction, queue, or database-backed scheduler.
 
-## Brand
+The binary owns four things:
 
-- Personality: calm, precise, observable, and operationally trustworthy
-- Trust signals: honest persisted state, explicit elapsed time, clear outcomes, and unchanged CLI evidence
-- Avoid: fake percentage progress, celebratory noise, hidden failures, and a second custom TUI
+1. validate a fixed team configuration and task/result contracts;
+2. persist and recover the lifecycle;
+3. isolate task and integration changes with Git worktrees;
+4. transport role prompts and marked JSON results through named Herdr agents.
 
-## Product goals
+## Deep modules
 
-- Goals: acknowledge every Pi command immediately, make long work visibly active, expose real task progress when available, and announce the final outcome
-- Non-goals: changing standalone CLI output, adding a model-callable tool, or replacing Pi's transcript/footer
-- Success signals: no silent wait, no stale loading indicator, and success/blocked/failure states are distinguishable without reading raw JSON first
+The CLI is intentionally shallow. Clap parses the command and global paths; `cli::execute` chooses read-only output or delegates a lifecycle operation. Protocol errors become exit code 2, while normal blocked/failed lifecycle values remain JSON results.
 
-## Personas and jobs
+`Orchestrator` is the primary deep module. Its public interface is the command lifecycle (`plan_goal`, `run`, `retry`, `review_task`, `integrate`, and `resume`). Scheduling, evidence checks, rework/replan routing, state transitions, final validation, and integration failure reporting stay local to its implementation.
 
-- Primary personas: developers running multi-agent repository work from Pi
-- User jobs: start work, understand whether it is still running, inspect orchestration state, and know what happened at completion
-- Key contexts of use: long model-backed commands, quick read-only commands, recovery after failures, and narrow terminal windows
+`RunStore` is a concrete deep module rather than a storage trait. It owns the on-disk camelCase protocol, atomic JSON replacement, JSONL history, result lookup, plan replacement, and recoverable exclusive locks.
 
-## Information architecture
+`GitManager` is also concrete. It serializes topology-changing worktree commands, records dependency-aware base commits, validates commit ancestry and clean trees, and integrates task ranges in topological order.
 
-- Primary navigation: one `/orchestrator` slash command with subcommands
-- Core routes/screens: Pi transcript, footer status, temporary progress widget, and notifications
-- Content hierarchy: current action and elapsed time first, persisted task progress second, complete command output in the transcript last
+## The one runtime seam
 
-## Design principles
+`AgentRuntime` is the only provider seam:
 
-- Immediate acknowledgement: show activity before filesystem, Git, or model work begins.
-- Honest progress: use indeterminate motion until a plan exists, then derive task counts and stages from `.orchestrator` state.
-- Durable evidence: notifications summarize; the custom transcript message remains the complete result.
-- Clean teardown: every success and exception path clears transient progress UI.
-- Tradeoffs: prefer a compact text progress bar over a custom component so Pi modes and terminal sizes behave consistently.
+```text
+Orchestrator → AgentRunner → AgentRuntime
+                              ├── HerdrRuntime
+                              └── RecordingRuntime (tests)
+```
 
-## Visual language
+Its interface has two operations: bootstrap the configured team and invoke one named identity in one cwd. That small interface hides current-tab topology, Codex launch configuration, footer calibration, cwd rebinding, identity mutexes, prompt transport, and screen reads. The two adapters make the seam real without leaking raw provider arguments into configuration.
 
-- Color: use Pi's existing notification semantics; progress text must remain understandable without color
-- Typography: terminal-native text with short labels and tabular numerals where Pi provides them
-- Spacing/layout rhythm: one compact footer label and one single-line widget
-- Shape/radius/elevation: not applicable
-- Motion: low-frequency spinner updates while work is active
-- Imagery/iconography: conventional `✓`, `!`, and spinner glyphs paired with text
+`AgentRunner` sits above the seam and owns cross-runtime behavior: unique markers, parsing the last valid marked JSON result, schema validation, run records, and logs.
 
-## Components
+## Current-tab topology
 
-- Existing components to reuse: `ctx.ui.setStatus`, `ctx.ui.setWidget`, `ctx.ui.notify`, and the existing custom transcript message
-- New/changed components: an extension-local command activity controller and outcome classifier
-- Variants and states: starting, running, task progress, success, blocked, and failure
-- Token/component ownership: Pi owns rendering and theme; this package owns only concise text content
+Bootstrap starts with `herdr pane current --current`. The caller remains the coordination pane and keeps focus. A right split receives 80% of the tab, then splits down 50/50. The upper row contains planner then sorted coders; the lower row contains tester, reviewer, and integrator. Incremental remainder splits keep each row equal-width.
 
-## Accessibility
+Every split has an explicit pane ID, repository cwd, and `--no-focus`. Pane rename and Codex start run together for each assignment. The completed topology is written to `herdr-layout.json`; later invocations compare repository, tab, normalized roster, live identity, and pane ID before reuse.
 
-- Target standard: terminal feedback understandable without animation or color
-- Keyboard/focus behavior: progress UI never takes focus
-- Contrast/readability: rely on Pi-native status and notification rendering
-- Screen-reader semantics: pair symbols with explicit words such as `completed`, `blocked`, and `failed`
-- Reduced motion and sensory considerations: animation is limited to a compact spinner; the action and elapsed time remain textual
+Bootstrap owns only panes it created. An incomplete bootstrap cleans those panes in reverse order. A completed layout is persisted before the planner is prompted, so planner failure preserves useful inspection state and a same-tab retry can reuse the team.
 
-## Responsive behavior
+## Codex configuration
 
-- Supported breakpoints/devices: terminal widths supported by Pi 0.84.1
-- Layout adaptations: keep progress to one short line and truncate task detail before core status
-- Touch/hover differences: not applicable
+Herdr starts each identity with `--kind codex` and passes native Codex arguments after `--`. Model, cwd, alternate-screen behavior, sandbox, and approval are explicit. `developer_instructions`, `model_reasoning_effort`, and `plan_mode_reasoning_effort` are TOML-escaped `-c` overrides.
 
-## Interaction states
+Planner/reviewer/integrator are read-only. Coder/tester use workspace-write. Approval is never. The footer is read after startup; plan/build mismatch is toggled once with `shift+tab`, then mode, model, and thinking are verified.
 
-- Loading: show action, spinner, and elapsed time immediately
-- Empty: `/orchestrator` without arguments displays help without a lingering loader
-- Error: clear activity, show an error notification with the first actionable message, and persist full stderr in the transcript
-- Success: clear activity and show a completion notification with elapsed time
-- Disabled: not applicable
-- Offline/slow network: elapsed time and persisted task stages continue to communicate activity
+An identity mutex covers cwd inspection/rebinding, prompt submission, wait, and result read. Different coder identities remain parallel; singleton identities cannot overlap turns. Rebinding quits the old Codex process and starts a new one in the same pane and identity, preserving communication names and layout.
 
-## Content voice
+## Lifecycle invariants
 
-- Tone: concise, factual, and action-oriented
-- Terminology: use existing command and lifecycle names
-- Microcopy rules: lead with `Orchestrator`, name the action/outcome, include elapsed time, and never claim completion for `blocked` or `failed` lifecycle results
+- Plan task IDs are unique; dependencies exist and are acyclic.
+- DAG work belongs to configured coders; tester, reviewer, and integrator are gates.
+- A completed coder result has passed self-tests and an exact clean-worktree HEAD commit.
+- Reported changed files equal the task commit range; implementation/refactor tasks include direct tests.
+- Tester changes require an exact clean commit and may touch only test-support paths.
+- Approved reviews have no issues; non-approved reviews have issues; replans include a plan-scoped issue.
+- Integration accepts only approved/completed/integrating tasks and applies task-local commit ranges in DAG order.
+- Completed runs cannot contain failed validation commands, and integrator evidence must exactly match locally observed commits and validations.
 
-## Implementation constraints
+## Persistence and recovery
 
-- Framework/styling system: Pi 0.84.1 extension API and TypeScript
-- Design-token constraints: use native notification types and plain text rather than hard-coded ANSI colors
-- Performance constraints: poll only small persisted JSON files and stop timers reliably
-- Compatibility constraints: preserve standalone CLI output, custom message visibility, `triggerTurn: false`, and all non-TUI Pi modes
-- Test/screenshot expectations: fake UI contract tests cover start, cleanup, notification, outcome classification, and unchanged transcript output
+Task files are the live snapshots; `plan.json` preserves the DAG and is overlaid with task snapshots when read. Every state transition writes the task before appending its audit record. State and plan snapshots use fsync plus rename. History and run records preserve enough evidence to explain and resume a stopped run.
 
-## Open questions
+Locks contain task ID, PID, nonce, and timestamp. A live PID blocks another execution. A dead owner is removed and audited. The nonce prevents one recovery attempt from deleting a replacement lock.
 
-- [ ] Validate whether users prefer the progress widget above or below the editor after real-world use; default is below to keep transcript evidence unobstructed.
+Recovery treats committed, clean coder evidence as durable. It rechecks the commit, diff, declared files, and tests before advancing to independent testing. Integration/final-validation states resume through the idempotent integration worktree path.
+
+## Compatibility
+
+The Rust release is intentionally destructive at the packaging boundary: the only executable is `lebang`; Node/npm/Pi extension entry points and old JSON configuration are unsupported. The persisted operational JSON remains camelCase and compatible with existing plan/state/task/history/run fixtures.

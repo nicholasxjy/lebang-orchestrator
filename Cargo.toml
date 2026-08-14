@@ -1,0 +1,31 @@
+[package]
+name = "lebang-orchestrator"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Git-native Codex team orchestration through Herdr"
+
+[[bin]]
+name = "lebang"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+futures = "0.3"
+libc = "0.2"
+regex = "1.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "macros", "process", "rt-multi-thread", "sync", "time"] }
+toml = "0.9"
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = "thin"

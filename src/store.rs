@@ -27,6 +27,8 @@ pub enum StoreError {
     },
     #[error("task {task_id} is already locked by process {pid}")]
     Locked { task_id: String, pid: u32 },
+    #[error("another orchestration command is already running for {0}")]
+    RunLocked(String),
     #[error(transparent)]
     Model(#[from] crate::model::ModelError),
 }
@@ -54,6 +56,31 @@ impl RunStore {
         }
     }
 
+    pub fn acquire_run_lock(&self) -> Result<RunLock, StoreError> {
+        create_dir_all(&self.locks_dir)?;
+        let path = self.locks_dir.join(".orchestration.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|source| StoreError::Io {
+                path: path.display().to_string(),
+                source,
+            })?;
+        match file.try_lock() {
+            Ok(()) => Ok(RunLock { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                Err(StoreError::RunLocked(self.root.display().to_string()))
+            }
+            Err(std::fs::TryLockError::Error(source)) => Err(StoreError::Io {
+                path: path.display().to_string(),
+                source,
+            }),
+        }
+    }
+
     pub fn initialize(&self, plan: &Plan) -> Result<(), StoreError> {
         plan.validate()?;
         if self.root.join("plan.json").exists() {
@@ -69,7 +96,6 @@ impl RunStore {
         ] {
             create_dir_all(directory)?;
         }
-        self.write_json(&self.root.join("plan.json"), plan)?;
         for task in &plan.tasks {
             self.write_json(&self.tasks_dir.join(format!("{}.json", task.id)), task)?;
         }
@@ -89,6 +115,8 @@ impl RunStore {
                 result: None,
             },
         )?;
+        // Publishing the plan is the initialization commit point: all snapshots exist first.
+        self.write_json(&self.root.join("plan.json"), plan)?;
         self.append_jsonl(
             &self.history_dir.join("run.jsonl"),
             &serde_json::json!({
@@ -103,7 +131,15 @@ impl RunStore {
     pub fn load_plan(&self) -> Result<Plan, StoreError> {
         let mut plan = Plan::from_value(self.read_value(&self.root.join("plan.json"))?)?;
         for task in &mut plan.tasks {
-            *task = self.read_json(&self.tasks_dir.join(format!("{}.json", task.id)))?;
+            let snapshot: Task =
+                self.read_json(&self.tasks_dir.join(format!("{}.json", task.id)))?;
+            if snapshot.id != task.id {
+                return Err(StoreError::MalformedState(format!(
+                    "task snapshot {} contains id {}",
+                    task.id, snapshot.id
+                )));
+            }
+            *task = snapshot;
             task.validate()?;
         }
         plan.validate()?;
@@ -313,6 +349,7 @@ impl RunStore {
     }
 
     pub fn acquire_task_lock(&self, task_id: &str) -> Result<TaskLock, StoreError> {
+        crate::model::validate_task_id(task_id)?;
         create_dir_all(&self.locks_dir)?;
         let path = self.locks_dir.join(format!("{task_id}.lock"));
         let nonce = Uuid::new_v4().simple().to_string();
@@ -474,6 +511,12 @@ impl RunStore {
 pub struct TaskLock {
     path: PathBuf,
     nonce: String,
+}
+
+// Keep the inode in place; closing the descriptor releases the OS lock even after a crash.
+#[derive(Debug)]
+pub struct RunLock {
+    _file: fs::File,
 }
 
 impl Drop for TaskLock {

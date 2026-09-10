@@ -138,92 +138,123 @@ async fn retry_recovers_a_coder_result_after_the_marker_was_omitted() {
 
 #[tokio::test]
 async fn resume_recovers_a_committed_coder_result_and_finishes() {
-    let root = tempdir().unwrap();
-    init_repo(root.path());
-    let base = git(root.path(), &["rev-parse", "HEAD"]);
-    let store = RunStore::new(root.path().join(".orchestrator"));
-    let mut task = make_task();
-    store
-        .initialize(&Plan {
-            goal: "Recover".into(),
-            base_commit: base.clone(),
-            tasks: vec![task.clone()],
-        })
-        .unwrap();
-    let manager = GitManager::new(root.path(), root.path().join(".worktrees"));
-    let snapshot = task.clone();
-    let worktree = manager
-        .prepare_task_worktree(&mut task, &[snapshot], &base)
-        .await
-        .unwrap();
-    fs::write(worktree.join("feature.txt"), "done\n").unwrap();
-    fs::create_dir_all(worktree.join("tests")).unwrap();
-    fs::write(worktree.join("tests/feature.txt"), "covered\n").unwrap();
-    git(&worktree, &["add", "feature.txt", "tests/feature.txt"]);
-    git(&worktree, &["commit", "-m", "T1"]);
-    let commit = git(&worktree, &["rev-parse", "HEAD"]);
-    task.status = TaskStatus::Running;
-    store.save_task(&task).unwrap();
+    for (original_status, tester_committed) in [
+        (TaskStatus::Running, false),
+        (TaskStatus::SelfVerifying, false),
+        (TaskStatus::Testing, false),
+        (TaskStatus::Reviewing, false),
+        (TaskStatus::Interrupted, false),
+        (TaskStatus::Reworking, false),
+        (TaskStatus::Reviewing, true),
+        (TaskStatus::Testing, true),
+        (TaskStatus::Interrupted, true),
+    ] {
+        let root = tempdir().unwrap();
+        init_repo(root.path());
+        let base = git(root.path(), &["rev-parse", "HEAD"]);
+        let store = RunStore::new(root.path().join(".orchestrator"));
+        let mut task = make_task();
+        store
+            .initialize(&Plan {
+                goal: "Recover".into(),
+                base_commit: base.clone(),
+                tasks: vec![task.clone()],
+            })
+            .unwrap();
+        let manager = GitManager::new(root.path(), root.path().join(".worktrees"));
+        let snapshot = task.clone();
+        let worktree = manager
+            .prepare_task_worktree(&mut task, &[snapshot], &base)
+            .await
+            .unwrap();
+        fs::write(worktree.join("feature.txt"), "done\n").unwrap();
+        fs::create_dir_all(worktree.join("tests")).unwrap();
+        fs::write(worktree.join("tests/feature.txt"), "covered\n").unwrap();
+        git(&worktree, &["add", "feature.txt", "tests/feature.txt"]);
+        git(&worktree, &["commit", "-m", "T1"]);
+        let commit = git(&worktree, &["rev-parse", "HEAD"]);
+        task.status = original_status;
+        store.save_task(&task).unwrap();
 
-    let coder_result = serde_json::json!({
-        "taskId": "T1", "status": "completed", "summary": "done",
-        "changedFiles": ["feature.txt", "tests/feature.txt"],
-        "testsAdded": ["tests/feature.txt"], "testsRun": ["test -f feature.txt"],
-        "testResult": "passed", "commit": commit, "blockers": []
-    });
-    let now = utc_now();
-    store
-        .write_result(
-            "T1",
-            "coder",
-            "crashed",
-            &AgentRunRecord {
-                run_id: "crashed".into(),
-                task_id: "T1".into(),
-                agent: "kd".into(),
-                role: "coder".into(),
-                model: "gpt-5.6-sol".into(),
-                cwd: worktree.display().to_string(),
-                start_time: now.clone(),
-                end_time: now,
-                exit_code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-                structured_result: Some(coder_result),
-                state_transition: Some("running -> self_verifying".into()),
-            },
-        )
-        .unwrap();
+        let coder_result = serde_json::json!({
+            "taskId": "T1", "status": "completed", "summary": "done",
+            "changedFiles": ["feature.txt", "tests/feature.txt"],
+            "testsAdded": ["tests/feature.txt"], "testsRun": ["test -f feature.txt"],
+            "testResult": "passed", "commit": commit, "blockers": []
+        });
+        let now = utc_now();
+        store
+            .write_result(
+                "T1",
+                "coder",
+                "crashed",
+                &AgentRunRecord {
+                    run_id: "crashed".into(),
+                    task_id: "T1".into(),
+                    agent: "kd".into(),
+                    agent_kind: None,
+                    role: "coder".into(),
+                    model: "gpt-5.6-sol".into(),
+                    cwd: worktree.display().to_string(),
+                    start_time: now.clone(),
+                    end_time: now,
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    structured_result: Some(coder_result),
+                    state_transition: Some("running -> self_verifying".into()),
+                },
+            )
+            .unwrap();
 
-    let runtime = Arc::new(RecordingRuntime::new([
-        serde_json::json!({
-            "taskId": "T1", "status": "passed", "testsExecuted": ["test -f feature.txt"],
-            "testsAdded": [], "failures": [], "commit": null
-        }),
-        serde_json::json!({"taskId": "T1", "status": "approved", "issues": []}),
-        serde_json::json!({
-            "status": "completed", "summary": "recovered", "integratedCommits": [commit],
-            "validations": [{
-                "command": ["git", "diff", "--check"], "exitCode": 0,
-                "stdout": "", "stderr": ""
-            }],
-            "issues": []
-        }),
-    ]));
-    let orchestrator =
-        Orchestrator::new(root.path(), Config::parse(DEFAULT_CONFIG).unwrap(), runtime);
-    let result = orchestrator.resume().await.unwrap();
+        let mut expected_commits = vec![commit.clone()];
+        if tester_committed {
+            fs::write(worktree.join("tests/regression.txt"), "regression coverage").unwrap();
+            git(&worktree, &["add", "tests/regression.txt"]);
+            git(&worktree, &["commit", "-m", "tester coverage"]);
+            let test_commit = git(&worktree, &["rev-parse", "HEAD"]);
+            task.commit = Some(test_commit.clone());
+            store.save_task(&task).unwrap();
+            expected_commits.push(test_commit.clone());
+            let now = utc_now();
+            store.write_result("T1", "tester", "tested", &AgentRunRecord {
+                run_id:"tested".into(), task_id:"T1".into(), agent:"westbrook".into(), agent_kind:None,
+                role:"tester".into(), model:"gpt-5.6-sol".into(), cwd:worktree.display().to_string(),
+                start_time:now.clone(), end_time:now, exit_code:0, stdout:String::new(), stderr:String::new(),
+                structured_result:Some(serde_json::json!({"taskId":"T1", "status":"passed", "testsExecuted":["test -f feature.txt"],
+                    "testsAdded":["tests/regression.txt"], "failures":[], "commit":test_commit})), state_transition:None,
+            }).unwrap();
+        }
+        let runtime = Arc::new(RecordingRuntime::new([
+            serde_json::json!({
+                "taskId": "T1", "status": "passed", "testsExecuted": ["test -f feature.txt"],
+                "testsAdded": [], "failures": [], "commit": null
+            }),
+            serde_json::json!({"taskId": "T1", "status": "approved", "issues": []}),
+            serde_json::json!({
+                "status": "completed", "summary": "recovered", "integratedCommits": expected_commits,
+                "validations": [{
+                    "command": ["git", "diff", "--check"], "exitCode": 0,
+                    "stdout": "", "stderr": ""
+                }],
+                "issues": []
+            }),
+        ]));
+        let orchestrator =
+            Orchestrator::new(root.path(), Config::parse(DEFAULT_CONFIG).unwrap(), runtime);
+        let result = orchestrator.resume().await.unwrap();
 
-    assert_eq!(result.status, LifecycleResultStatus::Completed);
-    assert_eq!(
-        orchestrator.store.load_plan().unwrap().tasks[0].status,
-        TaskStatus::Completed
-    );
-    assert!(
-        fs::read_to_string(orchestrator.store.history_dir.join("T1.jsonl"))
-            .unwrap()
-            .contains("recovered committed coder result")
-    );
+        assert_eq!(result.status, LifecycleResultStatus::Completed);
+        assert_eq!(
+            orchestrator.store.load_plan().unwrap().tasks[0].status,
+            TaskStatus::Completed
+        );
+        assert!(
+            fs::read_to_string(orchestrator.store.history_dir.join("T1.jsonl"))
+                .unwrap()
+                .contains("recovered committed coder result")
+        );
+    }
 }
 
 fn make_task() -> Task {

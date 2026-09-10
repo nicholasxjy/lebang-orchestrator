@@ -181,6 +181,9 @@ elif [ "$1 $2" = "agent send-keys" ]; then
   echo '{"result":{}}'
 elif [ "$1 $2" = "pane read" ]; then
   echo '{"result":{"output":"gpt-5.6-sol minimal low medium high xhigh Context"}}'
+elif [ "$1 $2" = "pane get" ]; then
+  identity=$(tr -d '\n' < "$HERDR_FAKE_STATE/pane-$3")
+  printf '{"result":{"pane":{"agent_session":{"agent":"codex","kind":"id","value":"%s-session"}}}}\n' "$identity"
 elif [ "$1 $2" = "agent prompt" ]; then
   identity=$3
   if [ "$4" = "/quit" ]; then
@@ -271,12 +274,22 @@ fi
     assert!(commands.contains(&format!("--cd {}", worktree.display())));
     assert!(commands.lines().any(|line| {
         line.starts_with("agent start curry ")
-            && line.contains(" -- resume --last ")
+            && line.contains(" -- resume curry-session ")
             && line.contains(&format!("--cd {}", worktree.display()))
     }));
     assert!(commands.contains("JSON-escape every quote and backslash"));
     assert!(commands.contains("Return exactly the keys defined by resultContract"));
     assert!(!state.join("concurrent-curry").exists());
+}
+
+#[test]
+fn marked_transport_recovers_after_an_unclosed_echoed_begin_marker() {
+    let value: serde_json::Value = parse_marked_result(
+        "RESULT_BEGIN is the marker to use\nRESULT_BEGIN\n{\"summary\":\"a  b\"}\nRESULT_END",
+        "RESULT",
+    )
+    .unwrap();
+    assert_eq!(value["summary"], "a  b");
 }
 
 #[tokio::test]

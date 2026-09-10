@@ -57,7 +57,7 @@ fn toml_rejects_invalid_rosters_identities_and_codex_settings() {
             .contains("must match")
     );
 
-    let non_codex = DEFAULT_CONFIG.replacen("agent = \"codex\"", "agent = \"pi\"", 1);
+    let non_codex = DEFAULT_CONFIG.replacen("\nagent = \"codex\"", "\nagent = \"unknown\"", 1);
     assert!(
         Config::parse(&non_codex)
             .unwrap_err()
@@ -83,6 +83,52 @@ fn toml_rejects_invalid_rosters_identities_and_codex_settings() {
 }
 
 #[test]
+fn parses_requested_agent_types_and_default_thinking() {
+    for kind in ["codex", "opencode", "pi", "gemini"] {
+        let config = DEFAULT_CONFIG
+            .replacen("\nagent = \"codex\"", &format!("\nagent = \"{kind}\""), 1)
+            .replacen("thinking = \"high\"\n", "", 1)
+            .replacen("model = \"gpt-5.6-sol\"", "model = \"openai/gpt-5\"", 1);
+        let parsed = Config::parse(&config).unwrap();
+        assert_eq!(
+            serde_json::to_value(&parsed.agents["lebang"]).unwrap()["agent"],
+            kind
+        );
+    }
+}
+
+#[test]
+fn native_thinking_settings_are_validated_before_launch() {
+    for (kind, thinking, accepted) in [
+        ("pi", "max", true),
+        ("pi", "off", true),
+        ("codex", "off", false),
+        ("gemini", "high", false),
+        ("gemini", "default", true),
+    ] {
+        let input = DEFAULT_CONFIG
+            .replacen("\nagent = \"codex\"", &format!("\nagent = \"{kind}\""), 1)
+            .replacen(
+                "thinking = \"high\"",
+                &format!("thinking = \"{thinking}\""),
+                1,
+            );
+        assert_eq!(
+            Config::parse(&input).is_ok(),
+            accepted,
+            "{kind}: {thinking}"
+        );
+    }
+    let invalid_model = DEFAULT_CONFIG.replacen("\nagent = \"codex\"", "\nagent = \"opencode\"", 1);
+    assert!(
+        Config::parse(&invalid_model)
+            .unwrap_err()
+            .to_string()
+            .contains("provider/model")
+    );
+}
+
+#[test]
 fn clap_exposes_the_complete_command_surface() {
     for args in [
         vec!["lebang", "init"],
@@ -99,4 +145,31 @@ fn clap_exposes_the_complete_command_surface() {
     ] {
         Cli::try_parse_from(args).unwrap();
     }
+}
+
+#[test]
+fn accepts_mixed_codex_and_claude_rosters_with_provider_specific_thinking() {
+    let example = Config::parse(include_str!("../examples/mixed-agents.toml")).unwrap();
+    assert_eq!(example.coders().len(), 2);
+    assert_eq!(example.max_workers, 2);
+    let mixed = DEFAULT_CONFIG
+        .replacen("\nagent = \"codex\"", "\nagent = \"claude\"", 1)
+        .replacen("model = \"gpt-5.6-sol\"", "model = \"sonnet\"", 1)
+        .replacen("thinking = \"high\"", "thinking = \"max\"", 1);
+    let config = Config::parse(&mixed).unwrap();
+    assert_eq!(
+        serde_json::to_value(&config.agents["lebang"]).unwrap()["agent"],
+        "claude"
+    );
+    assert_eq!(
+        serde_json::to_value(&config.agents["kd"]).unwrap()["agent"],
+        "codex"
+    );
+    let invalid = mixed.replacen("thinking = \"max\"", "thinking = \"minimal\"", 1);
+    assert!(
+        Config::parse(&invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("thinking")
+    );
 }

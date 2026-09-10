@@ -2,6 +2,11 @@
 # The model values below are examples, not a promise of account availability.
 max_workers = 1
 max_review_attempts = 3
+agent_timeout_seconds = 3600
+validation_timeout_seconds = 3600
+
+# Agent types: codex, opencode, pi, gemini, claude (independently per identity).
+# Set a model supported by that CLI. See examples/mixed-agents.toml.
 
 # Replace these with the repository's real final validation commands.
 validation_commands = [

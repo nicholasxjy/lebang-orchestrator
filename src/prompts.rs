@@ -99,6 +99,16 @@ pub fn coder_prompt(
 }
 
 pub fn tester_prompt(goal: &str, task: &Task, coder: &CoderResult, diff: &str) -> String {
+    tester_rework_prompt(goal, task, coder, diff, &[])
+}
+
+pub fn tester_rework_prompt(
+    goal: &str,
+    task: &Task,
+    coder: &CoderResult,
+    diff: &str,
+    issues: &[crate::model::Issue],
+) -> String {
     context(
         "Independently test this task and return exactly one TestResult JSON object. Context:",
         json!({
@@ -106,6 +116,7 @@ pub fn tester_prompt(goal: &str, task: &Task, coder: &CoderResult, diff: &str) -
             "task": task,
             "coderResult": coder,
             "gitDiff": diff,
+            "reworkIssues": issues,
             "issueRouting": [
                 "Use task scope for production defects and missing direct unit tests; these return to the original coder.",
                 "Use test scope only for missing regression, edge, or integration coverage; these return to the tester.",

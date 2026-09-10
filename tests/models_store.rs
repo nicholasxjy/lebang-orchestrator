@@ -129,3 +129,36 @@ fn copy_fixture_tree(root: &std::path::Path) {
     fs::copy(fixture("tasks/T1.json"), root.join("tasks/T1.json")).unwrap();
     fs::copy(fixture("history/run.jsonl"), root.join("history/run.jsonl")).unwrap();
 }
+
+#[test]
+fn orchestration_lock_is_shared_across_store_instances_and_released_on_drop() {
+    let root = tempdir().unwrap();
+    let first_store = RunStore::new(root.path());
+    let second_store = RunStore::new(root.path());
+    let guard = first_store.acquire_run_lock().unwrap();
+    assert!(
+        second_store
+            .acquire_run_lock()
+            .unwrap_err()
+            .to_string()
+            .contains("already running")
+    );
+    drop(guard);
+    second_store.acquire_run_lock().unwrap();
+}
+
+#[test]
+fn unsafe_task_ids_are_rejected_before_any_files_are_written() {
+    let root = tempdir().unwrap();
+    let store = RunStore::new(root.path().join("store"));
+    let plan = Plan::parse_str(&fs::read_to_string(fixture("plan.json")).unwrap()).unwrap();
+    for id in ["../escaped", "/tmp/escaped", "..", "T1\nT2", "T1/T2"] {
+        let mut plan = plan.clone();
+        plan.tasks[0].id = id.into();
+        assert!(
+            store.initialize(&plan).is_err(),
+            "accepted unsafe id {id:?}"
+        );
+        assert!(!store.root.join("plan.json").exists());
+    }
+}

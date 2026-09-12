@@ -12,7 +12,8 @@ use thiserror::Error;
 use tokio::{process::Command, sync::Mutex, time::timeout};
 
 use crate::{
-    config::{AgentConfig, Config, Role},
+    agent_launch::{self, NativeSession},
+    config::{AgentConfig, AgentKind, Config, Role, Thinking},
     store::RunStore,
 };
 
@@ -148,6 +149,14 @@ pub struct HerdrRuntime {
     config: Config,
     environment: BTreeMap<String, String>,
     identity_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    session_lock: Mutex<()>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum SavedSession {
+    Reference(NativeSession),
+    LegacyId(String),
 }
 
 impl HerdrRuntime {
@@ -165,6 +174,7 @@ impl HerdrRuntime {
             config,
             environment,
             identity_locks: Mutex::new(HashMap::new()),
+            session_lock: Mutex::new(()),
         }
     }
 
@@ -266,16 +276,7 @@ impl HerdrRuntime {
         layout: &HerdrLayout,
         current_tab: &str,
     ) -> Result<(), RuntimeError> {
-        let expected_roster = self.config.agents.values().cloned().collect::<Vec<_>>();
-        if layout.repo_root != path_string(&self.repo_root)
-            || layout.tab_id != current_tab
-            || layout.roster != expected_roster
-        {
-            return Err(RuntimeError::Conflict(format!(
-                "recorded Herdr layout belongs to repository/tab/roster {}/{}/different configuration; current tab is {current_tab}",
-                layout.repo_root, layout.tab_id
-            )));
-        }
+        self.validate_layout_configuration(layout, Some(current_tab))?;
         for (identity, location) in &layout.agents {
             let existing = self
                 .run(
@@ -293,17 +294,45 @@ impl HerdrRuntime {
             let actual = response_string(&existing.stdout, &["pane_id", "paneId"])?;
             if actual.as_deref() != Some(location.pane_id.as_str()) {
                 return Err(RuntimeError::Conflict(format!(
-                    "Herdr agent {identity} is live in {}, expected {}",
-                    actual.unwrap_or_else(|| "an unknown pane".into()),
+                    "Herdr agent {identity} is not in its recorded pane {}",
                     location.pane_id
                 )));
             }
-            let agent = self.config.agents.get(identity).ok_or_else(|| {
-                RuntimeError::Conflict(format!(
-                    "recorded Herdr identity {identity} is absent from the current roster"
-                ))
-            })?;
-            self.calibrate(agent, &location.pane_id).await?;
+            self.calibrate(&self.config.agents[identity], &location.pane_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    fn validate_layout_configuration(
+        &self,
+        layout: &HerdrLayout,
+        current_tab: Option<&str>,
+    ) -> Result<(), RuntimeError> {
+        let expected_roster = self.config.agents.values().cloned().collect::<Vec<_>>();
+        if absolute(Path::new(&layout.repo_root)) != absolute(&self.repo_root)
+            || current_tab.is_some_and(|tab| layout.tab_id != tab)
+            || layout.roster != expected_roster
+        {
+            return Err(RuntimeError::Conflict(format!(
+                "recorded Herdr layout belongs to repository/tab/roster {}/{}/different configuration; current tab is {current_tab:?}",
+                layout.repo_root, layout.tab_id
+            )));
+        }
+        let panes = layout
+            .agents
+            .values()
+            .map(|p| p.pane_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        if layout.version != 1
+            || layout.agents.keys().ne(self.config.agents.keys())
+            || panes.len() != layout.agents.len()
+            || panes.contains(layout.coordinator_pane.as_str())
+            || panes.contains("")
+        {
+            return Err(RuntimeError::Conflict(
+                "recorded Herdr layout is incomplete or has conflicting panes".into(),
+            ));
         }
         Ok(())
     }
@@ -374,12 +403,56 @@ impl HerdrRuntime {
         cwd: &Path,
         resume: bool,
     ) -> Result<(), RuntimeError> {
-        let args = self.start_arguments(agent, pane, cwd, resume)?;
+        let session = if resume {
+            self.saved_session(agent, cwd)?
+        } else {
+            None
+        };
+        let launch = agent_launch::prepare(
+            agent,
+            cwd,
+            &self.git_common_dir()?,
+            &RunStore::new(self.repo_root.join(".orchestrator")),
+            &self.developer_instructions(agent)?,
+            session.as_ref(),
+            &self.environment,
+        )?;
+        if agent.agent != AgentKind::Codex {
+            self.set_pane_cwd(pane, cwd).await?;
+        }
+        for (name, value) in &launch.environment {
+            self.run_checked(
+                vec![
+                    "pane".into(),
+                    "run".into(),
+                    pane.into(),
+                    format!("export {name}={}", shell_quote(value)),
+                ],
+                cwd,
+                Duration::from_secs(30),
+                "configure agent environment",
+            )
+            .await?;
+        }
+        let mut args = vec![
+            "agent".into(),
+            "start".into(),
+            agent.identity.clone(),
+            "--kind".into(),
+            agent.agent.as_str().into(),
+            "--pane".into(),
+            pane.into(),
+            "--timeout".into(),
+            "120000".into(),
+            "--".into(),
+        ];
+        args.extend(launch.arguments);
         for attempt in 1..=40 {
             let output = self
                 .run(args.clone(), cwd, Duration::from_secs(125))
                 .await?;
             if output.code == 0 {
+                self.remember_session(agent, pane, cwd).await?;
                 return Ok(());
             }
             let busy = response_error_code(&output.stderr).as_deref() == Some("agent_pane_busy")
@@ -390,67 +463,6 @@ impl HerdrRuntime {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
         unreachable!()
-    }
-
-    fn start_arguments(
-        &self,
-        agent: &AgentConfig,
-        pane: &str,
-        cwd: &Path,
-        resume: bool,
-    ) -> Result<Vec<String>, RuntimeError> {
-        let sandbox = match agent.role {
-            Role::Coder | Role::Tester => "workspace-write",
-            Role::Planner | Role::Reviewer | Role::Integrator => "read-only",
-        };
-        let instructions = self.developer_instructions(agent)?;
-        let mut args = vec![
-            "agent".into(),
-            "start".into(),
-            agent.identity.clone(),
-            "--kind".into(),
-            "codex".into(),
-            "--pane".into(),
-            pane.into(),
-            "--timeout".into(),
-            "120000".into(),
-            "--".into(),
-        ];
-        if resume {
-            args.extend(["resume".into(), "--last".into()]);
-        }
-        args.extend([
-            "--model".into(),
-            agent.model.clone(),
-            "--cd".into(),
-            path_string(cwd),
-            "--no-alt-screen".into(),
-            "--sandbox".into(),
-            sandbox.into(),
-        ]);
-        if matches!(agent.role, Role::Coder | Role::Tester) {
-            args.extend([
-                "--add-dir".into(),
-                path_string(&self.repo_root.join(".git")),
-            ]);
-        }
-        args.extend([
-            "--ask-for-approval".into(),
-            "never".into(),
-            "-c".into(),
-            format!(
-                "model_reasoning_effort={}",
-                toml_string(agent.thinking.as_str())
-            ),
-            "-c".into(),
-            format!(
-                "plan_mode_reasoning_effort={}",
-                toml_string(agent.thinking.as_str())
-            ),
-            "-c".into(),
-            format!("developer_instructions={}", toml_string(&instructions)),
-        ]);
-        Ok(args)
     }
 
     fn developer_instructions(&self, agent: &AgentConfig) -> Result<String, RuntimeError> {
@@ -472,6 +484,183 @@ impl HerdrRuntime {
         ))
     }
 
+    fn git_common_dir(&self) -> Result<PathBuf, RuntimeError> {
+        let dot_git = self.repo_root.join(".git");
+        if !dot_git.is_file() {
+            return Ok(dot_git);
+        }
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(&self.repo_root)
+            .output()?;
+        if !output.status.success() {
+            return Err(RuntimeError::Invalid(
+                "cannot resolve shared Git directory".into(),
+            ));
+        }
+        Ok(PathBuf::from(
+            String::from_utf8_lossy(&output.stdout).trim(),
+        ))
+    }
+
+    async fn set_pane_cwd(&self, pane: &str, cwd: &Path) -> Result<(), RuntimeError> {
+        self.wait_for_shell(pane).await?;
+        let quoted = shell_quote(&path_string(cwd));
+        self.run_checked(
+            vec![
+                "pane".into(),
+                "run".into(),
+                pane.into(),
+                format!("cd -- {quoted}"),
+            ],
+            cwd,
+            Duration::from_secs(30),
+            "set agent working directory",
+        )
+        .await?;
+        for _ in 0..40 {
+            let output = self
+                .run_checked(
+                    vec!["pane".into(), "get".into(), pane.into()],
+                    cwd,
+                    Duration::from_secs(30),
+                    "check agent working directory",
+                )
+                .await?;
+            if response_string(&output, &["foreground_cwd", "cwd"])?
+                .is_some_and(|actual| absolute(Path::new(&actual)) == absolute(cwd))
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        Err(RuntimeError::Invalid(format!(
+            "pane {pane} did not enter {}",
+            cwd.display()
+        )))
+    }
+
+    async fn wait_for_shell(&self, pane: &str) -> Result<(), RuntimeError> {
+        for _ in 0..40 {
+            let output = self
+                .run_checked(
+                    vec![
+                        "pane".into(),
+                        "process-info".into(),
+                        "--pane".into(),
+                        pane.into(),
+                    ],
+                    &self.repo_root,
+                    Duration::from_secs(30),
+                    "wait for agent shell",
+                )
+                .await?;
+            let value: Value =
+                serde_json::from_str(&output).map_err(|e| RuntimeError::Response(e.to_string()))?;
+            let info = value
+                .pointer("/result/process_info")
+                .unwrap_or(&Value::Null);
+            if let Some(shell) = info.get("shell_pid").and_then(Value::as_u64)
+                && info
+                    .get("foreground_process_group_id")
+                    .and_then(Value::as_u64)
+                    == Some(shell)
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        Err(RuntimeError::Conflict(format!(
+            "pane {pane} has not returned to its shell"
+        )))
+    }
+
+    fn session_key(&self, agent: &AgentConfig, cwd: &Path) -> String {
+        format!(
+            "{}:{}:{}",
+            agent.agent.as_str(),
+            agent.identity,
+            path_string(&absolute(cwd))
+        )
+    }
+
+    fn saved_session(
+        &self,
+        agent: &AgentConfig,
+        cwd: &Path,
+    ) -> Result<Option<NativeSession>, RuntimeError> {
+        let store = RunStore::new(self.repo_root.join(".orchestrator"));
+        let path = store.root.join("agent-sessions.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let mut sessions: BTreeMap<String, SavedSession> = store.read_json(&path)?;
+        Ok(sessions
+            .remove(&self.session_key(agent, cwd))
+            .map(|saved| match saved {
+                SavedSession::Reference(session) => session,
+                SavedSession::LegacyId(id) => NativeSession::Id(id),
+            }))
+    }
+
+    async fn remember_session(
+        &self,
+        agent: &AgentConfig,
+        pane: &str,
+        cwd: &Path,
+    ) -> Result<(), RuntimeError> {
+        let output = self
+            .run(
+                vec!["pane".into(), "get".into(), pane.into()],
+                &self.repo_root,
+                Duration::from_secs(30),
+            )
+            .await?;
+        if output.code != 0 {
+            return Ok(());
+        }
+        let value: Value = serde_json::from_str(&output.stdout)
+            .map_err(|error| RuntimeError::Response(error.to_string()))?;
+        let pane_info = value
+            .pointer("/result/pane")
+            .or_else(|| value.get("result"))
+            .unwrap_or(&value);
+        let Some(session) = pane_info.get("agent_session") else {
+            return Ok(());
+        };
+        if session.get("agent").and_then(Value::as_str) != Some(agent.agent.as_str()) {
+            return Ok(());
+        }
+        let Some(id) = session
+            .get("value")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        else {
+            return Ok(());
+        };
+        let reference = match session.get("kind").and_then(Value::as_str) {
+            Some("id") => NativeSession::Id(id.into()),
+            Some("path") if matches!(agent.agent, AgentKind::Pi | AgentKind::Gemini) => {
+                NativeSession::Path(id.into())
+            }
+            _ => return Ok(()),
+        };
+        let _guard = self.session_lock.lock().await;
+        let store = RunStore::new(self.repo_root.join(".orchestrator"));
+        let path = store.root.join("agent-sessions.json");
+        let mut sessions: BTreeMap<String, SavedSession> = if path.exists() {
+            store.read_json(&path)?
+        } else {
+            BTreeMap::new()
+        };
+        sessions.insert(
+            self.session_key(agent, cwd),
+            SavedSession::Reference(reference),
+        );
+        store.write_json(&path, &sessions)?;
+        Ok(())
+    }
+
     fn resolve_skill(&self, skill: &str) -> Result<String, RuntimeError> {
         let override_path = self.repo_root.join(".skills").join(skill).join("SKILL.md");
         if override_path.is_file() {
@@ -483,6 +672,11 @@ impl HerdrRuntime {
     }
 
     async fn calibrate(&self, agent: &AgentConfig, pane: &str) -> Result<(), RuntimeError> {
+        // Only Codex exposes the model/effort footer checked here. Other CLIs use
+        // their native configuration and Herdr's --kind readiness/type detection.
+        if agent.agent != AgentKind::Codex {
+            return Ok(());
+        }
         let footer = self.read_footer(pane).await?;
         let lower = footer.to_lowercase();
         if !lower.contains(&agent.model.to_lowercase()) {
@@ -491,7 +685,7 @@ impl HerdrRuntime {
                 agent.identity, agent.model
             )));
         }
-        if !lower.contains(agent.thinking.as_str()) {
+        if agent.thinking != Thinking::Default && !lower.contains(agent.thinking.as_str()) {
             return Err(RuntimeError::Invalid(format!(
                 "Codex footer for {} does not show configured thinking {}: {footer}",
                 agent.identity,
@@ -539,19 +733,49 @@ impl HerdrRuntime {
         let current_cwd = if needs_start {
             None
         } else {
-            response_string(&existing.stdout, &["cwd"])?
+            response_string(&existing.stdout, &["foreground_cwd", "cwd"])?
         };
-        if !needs_start && current_cwd.as_deref() == Some(path_string(cwd).as_str()) {
-            return Ok(());
-        }
         if !needs_start {
+            let actual_pane = response_string(&existing.stdout, &["pane_id", "paneId"])?;
+            if actual_pane.as_deref() != Some(pane) {
+                return Err(RuntimeError::Conflict(format!(
+                    "Herdr agent {} moved to another pane",
+                    agent.identity
+                )));
+            }
+            if response_string(&existing.stdout, &["agent", "kind"])?
+                .is_some_and(|kind| kind != agent.agent.as_str())
+            {
+                return Err(RuntimeError::Conflict(format!(
+                    "Herdr agent {} has a different agent type",
+                    agent.identity
+                )));
+            }
+            if response_string(&existing.stdout, &["agent_status"])?
+                .is_some_and(|status| matches!(status.as_str(), "working" | "blocked"))
+            {
+                return Err(RuntimeError::Conflict(format!(
+                    "Herdr agent {} is still working or awaiting input",
+                    agent.identity
+                )));
+            }
+            if current_cwd
+                .as_deref()
+                .is_some_and(|actual| absolute(Path::new(actual)) == absolute(cwd))
+            {
+                return Ok(());
+            }
+            if let Some(current_cwd) = current_cwd.as_deref() {
+                self.remember_session(agent, pane, Path::new(current_cwd))
+                    .await?;
+            }
             let _ = self
                 .run(
                     vec![
                         "agent".into(),
                         "prompt".into(),
                         agent.identity.clone(),
-                        "/quit".into(),
+                        agent.agent.exit_command().into(),
                         "--wait".into(),
                         "--timeout".into(),
                         "30000".into(),
@@ -637,6 +861,7 @@ impl HerdrRuntime {
         let action = command
             .as_std()
             .get_args()
+            .take(3)
             .map(|arg| arg.to_string_lossy())
             .collect::<Vec<_>>()
             .join(" ");
@@ -669,6 +894,15 @@ impl AgentRuntime for HerdrRuntime {
         let layout = self.load_layout()?.ok_or_else(|| {
             RuntimeError::Invalid("no recorded Herdr layout; run lebang plan first".into())
         })?;
+        self.validate_layout_configuration(
+            &layout,
+            self.environment.get("HERDR_TAB_ID").map(String::as_str),
+        )?;
+        if self.config.agents.get(&request.agent.identity) != Some(&request.agent) {
+            return Err(RuntimeError::Conflict(
+                "invocation does not match the configured roster".into(),
+            ));
+        }
         let pane = layout
             .agents
             .get(&request.agent.identity)
@@ -684,25 +918,40 @@ impl AgentRuntime for HerdrRuntime {
         let _guard = lock.lock().await;
         self.rebind_if_needed(&request.agent, &pane, &request.cwd, request.resume_session)
             .await?;
+        let prompt = if request.agent.agent == AgentKind::Gemini {
+            format!(
+                "{}\n\n{}",
+                self.developer_instructions(&request.agent)?,
+                request.prompt
+            )
+        } else {
+            request.prompt
+        };
         let transport = format!(
             "{}\n\nHerdr result transport:\nEnd the response with {}_BEGIN on its own line, then one compact JSON object on one line, then {}_END on its own line. Return exactly the keys defined by resultContract and no additional top-level keys. The JSON must be syntactically valid; JSON-escape every quote and backslash inside string values.\nDo not place any text after the end marker.",
-            request.prompt, request.marker, request.marker
+            prompt, request.marker, request.marker
         );
-        self.run_checked(
-            vec![
-                "agent".into(),
-                "prompt".into(),
-                request.agent.identity.clone(),
-                transport,
-                "--wait".into(),
-                "--timeout".into(),
-                request.timeout.as_millis().to_string(),
-            ],
-            &request.cwd,
-            request.timeout + Duration::from_secs(5),
-            &format!("prompt {}", request.agent.identity),
-        )
-        .await?;
+        let prompted = self
+            .run_checked(
+                vec![
+                    "agent".into(),
+                    "prompt".into(),
+                    request.agent.identity.clone(),
+                    transport,
+                    "--wait".into(),
+                    "--timeout".into(),
+                    request.timeout.as_millis().to_string(),
+                ],
+                &request.cwd,
+                request.timeout + Duration::from_secs(5),
+                &format!("prompt {}", request.agent.identity),
+            )
+            .await;
+        let session = self
+            .remember_session(&request.agent, &pane, &request.cwd)
+            .await;
+        prompted?;
+        session?;
         let output = self
             .run_checked(
                 vec![
@@ -727,27 +976,27 @@ pub fn parse_marked_result<T: DeserializeOwned>(
     transcript: &str,
     marker: &str,
 ) -> Result<T, RuntimeError> {
+    let begin = format!("{marker}_BEGIN");
+    let end = format!("{marker}_END");
+    let parse = |text: &str| {
+        for (offset, _) in text.rmatch_indices(&begin) {
+            let start = offset + begin.len();
+            for (length, _) in text[start..].match_indices(&end) {
+                if let Ok(value) = serde_json::from_str::<T>(text[start..start + length].trim()) {
+                    return Some(value);
+                }
+            }
+        }
+        None
+    };
+    if let Some(value) = parse(transcript) {
+        return Ok(value);
+    }
     let transcript = transcript
         .lines()
         .map(|line| line.strip_prefix("  ").unwrap_or(line))
         .collect::<String>();
-    let begin = format!("{marker}_BEGIN");
-    let end = format!("{marker}_END");
-    let mut offset = 0;
-    let mut last = None;
-    while let Some(relative_start) = transcript[offset..].find(&begin) {
-        let start = offset + relative_start + begin.len();
-        let Some(relative_end) = transcript[start..].find(&end) else {
-            break;
-        };
-        let finish = start + relative_end;
-        let candidate = transcript[start..finish].trim();
-        if let Ok(value) = serde_json::from_str(candidate) {
-            last = Some(value);
-        }
-        offset = finish + end.len();
-    }
-    last.ok_or_else(|| RuntimeError::Invalid(MISSING_MARKED_RESULT.into()))
+    parse(&transcript).ok_or_else(|| RuntimeError::Invalid(MISSING_MARKED_RESULT.into()))
 }
 
 #[derive(Debug)]
@@ -779,6 +1028,11 @@ fn find_string(value: &Value, keys: &[&str]) -> Option<String> {
     match value {
         Value::Array(values) => values.iter().find_map(|value| find_string(value, keys)),
         Value::Object(values) => {
+            for key in keys {
+                if let Some(value) = values.get(*key).and_then(Value::as_str) {
+                    return Some(value.to_owned());
+                }
+            }
             for (key, value) in values {
                 if keys.contains(&key.as_str())
                     && let Some(value) = value.as_str()
@@ -824,23 +1078,6 @@ fn response_error_code(output: &str) -> Option<String> {
         .and_then(|value| find_string(&value, &["code"]))
 }
 
-fn toml_string(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len() + 2);
-    encoded.push('"');
-    for character in value.chars() {
-        match character {
-            '"' => encoded.push_str("\\\""),
-            '\\' => encoded.push_str("\\\\"),
-            character if character.is_control() => {
-                encoded.push_str(&format!("\\u{:04X}", character as u32));
-            }
-            character => encoded.push(character),
-        }
-    }
-    encoded.push('"');
-    encoded
-}
-
 fn builtin_skill(name: &str) -> Option<&'static str> {
     match name {
         "planner" => Some(include_str!("../skills/planner/SKILL.md")),
@@ -866,17 +1103,6 @@ fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::toml_string;
-
-    #[test]
-    fn toml_string_round_trips_without_literal_control_characters() {
-        let original = "first line\nsecond\tline\r\u{007f}";
-        let encoded = toml_string(original);
-
-        assert!(!encoded.chars().any(char::is_control));
-        let parsed = toml::from_str::<toml::Table>(&format!("value = {encoded}")).unwrap();
-        assert_eq!(parsed["value"].as_str(), Some(original));
-    }
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }

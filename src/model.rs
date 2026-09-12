@@ -106,6 +106,7 @@ pub struct Task {
 
 impl Task {
     pub fn validate(&self) -> Result<(), ModelError> {
+        validate_task_id(&self.id)?;
         if self.id.is_empty() || self.title.is_empty() || self.description.is_empty() {
             return Err(invalid(
                 "task",
@@ -123,6 +124,21 @@ impl Task {
         }
         Ok(())
     }
+}
+
+pub fn validate_task_id(id: &str) -> Result<(), ModelError> {
+    if id.len() > 128
+        || !id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+        || !id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+    {
+        return Err(invalid(
+            "task",
+            "id must be a safe filename starting with a letter or digit (at most 128 bytes)",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -154,9 +170,12 @@ impl Plan {
             ));
         }
         let mut by_id = HashMap::new();
+        let mut file_ids = HashSet::new();
         for task in &self.tasks {
             task.validate()?;
-            if by_id.insert(task.id.as_str(), task).is_some() {
+            if by_id.insert(task.id.as_str(), task).is_some()
+                || !file_ids.insert(task.id.to_ascii_lowercase())
+            {
                 return Err(invalid("plan", "task ids must be unique"));
             }
         }
@@ -461,6 +480,8 @@ pub struct AgentRunRecord {
     pub run_id: String,
     pub task_id: String,
     pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_kind: Option<crate::config::AgentKind>,
     pub role: String,
     pub model: String,
     pub cwd: String,

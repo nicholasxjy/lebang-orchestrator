@@ -5,7 +5,7 @@ use std::{
 
 use regex::Regex;
 use thiserror::Error;
-use tokio::{process::Command, sync::Mutex};
+use tokio::{io::AsyncWriteExt, process::Command, sync::Mutex};
 
 use crate::model::{Task, TaskStatus};
 
@@ -56,6 +56,8 @@ impl GitManager {
         validate_component(agent, "agent identity")?;
         let branch = format!("agent/{agent}/{}", task.id);
         let path = self.worktrees_root.join(format!("{}-{agent}", task.id));
+        let recorded_base = task.base_commit.clone();
+        let recorded_branch = task.branch.clone();
         if let Some(recorded) = &task.worktree {
             if absolute(Path::new(recorded)) != path {
                 return Err(GitError::Invalid(format!(
@@ -116,6 +118,13 @@ impl GitManager {
 
         task.branch = Some(branch);
         task.worktree = Some(path_string(&path));
+        if let Some(base) = recorded_base
+            && recorded_branch == task.branch
+        {
+            self.require_ancestor(&base, &self.current_commit(&path).await?)
+                .await?;
+            return Ok(path);
+        }
         for dependency in dependency_order(task, all_tasks)? {
             if !matches!(
                 dependency.status,
@@ -169,13 +178,22 @@ impl GitManager {
         ))
     }
 
+    pub async fn require_ancestor(&self, base: &str, commit: &str) -> Result<(), GitError> {
+        self.git(
+            ["merge-base", "--is-ancestor", base, commit],
+            &self.repo_root,
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn prepare_integration_worktree(
         &self,
         tasks: &[Task],
         base: &str,
         run_id: &str,
         integrator: &str,
-        already_integrated: &HashSet<String>,
+        _already_integrated: &HashSet<String>,
     ) -> Result<(PathBuf, Vec<String>), GitError> {
         validate_component(run_id, "run id")?;
         validate_component(integrator, "integrator identity")?;
@@ -231,27 +249,92 @@ impl GitManager {
         }
         let mut commits = Vec::new();
         for task in topological_tasks(tasks)? {
-            for commit in self.task_commits(task).await? {
-                if !already_integrated.contains(&commit) {
-                    self.git(vec!["cherry-pick".into(), commit.clone()], &path)
-                        .await?;
-                }
-                commits.push(commit);
+            commits.extend(self.task_commits(task).await?);
+        }
+        // Git is the durable record when the process stops before state.json is saved.
+        // Compare the applied prefix by patch, since cherry-picking changes commit IDs.
+        self.require_ancestor(base, &self.current_commit(&path).await?)
+            .await?;
+        if !self.head_is_clean(&path).await? {
+            return Err(GitError::Invalid(
+                "integration worktree has uncommitted changes; resolve them before retrying".into(),
+            ));
+        }
+        let applied = split_lines(
+            &self
+                .git(["rev-list", "--reverse", &format!("{base}..HEAD")], &path)
+                .await?,
+        );
+        if applied.len() > commits.len() {
+            return Err(GitError::Invalid(
+                "integration branch contains unexpected commits".into(),
+            ));
+        }
+        for (actual, source) in applied.iter().zip(&commits) {
+            if actual != source
+                && self.commit_patch(actual).await? != self.commit_patch(source).await?
+            {
+                return Err(GitError::Invalid(format!(
+                    "integration commit {actual} does not match approved commit {source}"
+                )));
+            }
+        }
+        for commit in commits.iter().skip(applied.len()) {
+            if let Err(error) = self.git(["cherry-pick", "-x", commit], &path).await {
+                // Abort only the pick started here; keep the successfully applied prefix.
+                let _ = self.git(["cherry-pick", "--abort"], &path).await;
+                return Err(error);
             }
         }
         Ok((path, commits))
     }
 
+    async fn commit_patch(&self, commit: &str) -> Result<String, GitError> {
+        let patch = self
+            .git(
+                [
+                    "diff",
+                    "--binary",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--no-renames",
+                    &format!("{commit}^"),
+                    commit,
+                ],
+                &self.repo_root,
+            )
+            .await?;
+        let mut child = Command::new("git")
+            .args(["patch-id", "--stable"])
+            .current_dir(&self.repo_root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(patch.as_bytes())
+            .await?;
+        let output = child.wait_with_output().await?;
+        if !output.status.success() {
+            return Err(GitError::Invalid(
+                "cannot compute integration patch identity".into(),
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .into())
+    }
+
     pub async fn changed_files(&self, task: &Task) -> Result<Vec<String>, GitError> {
         let (base, commit) = commit_range(task)?;
-        Ok(split_lines(
-            &self
-                .git(
-                    ["diff", "--name-only", &format!("{base}..{commit}")],
-                    &self.repo_root,
-                )
-                .await?,
-        ))
+        self.require_ancestor(base, commit).await?;
+        self.changed_files_between(base, commit).await
     }
 
     pub async fn changed_files_between(
@@ -259,14 +342,32 @@ impl GitManager {
         before: &str,
         after: &str,
     ) -> Result<Vec<String>, GitError> {
-        Ok(split_lines(
-            &self
-                .git(
-                    ["diff", "--name-only", &format!("{before}..{after}")],
-                    &self.repo_root,
-                )
-                .await?,
-        ))
+        let (code, stdout, stderr) = self
+            .run_git(
+                [
+                    "diff",
+                    "--name-only",
+                    "--no-renames",
+                    "-z",
+                    before,
+                    after,
+                    "--",
+                ],
+                &self.repo_root,
+            )
+            .await?;
+        if code != 0 {
+            return Err(GitError::Command {
+                command: "diff --name-only".into(),
+                code,
+                detail: stderr,
+            });
+        }
+        Ok(stdout
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect())
     }
 
     pub async fn task_diff(&self, task: &Task) -> Result<String, GitError> {
@@ -279,12 +380,19 @@ impl GitManager {
     }
 
     pub async fn head_is_clean(&self, cwd: &Path) -> Result<bool, GitError> {
-        let (_, stdout, _) = self
+        let (code, stdout, stderr) = self
             .run_git(
                 ["status", "--porcelain=v1", "--untracked-files=all", "-z"],
                 cwd,
             )
             .await?;
+        if code != 0 {
+            return Err(GitError::Command {
+                command: "status".into(),
+                code,
+                detail: stderr,
+            });
+        }
         for entry in stdout.split('\0').filter(|entry| !entry.is_empty()) {
             if entry.len() < 4 {
                 return Ok(false);

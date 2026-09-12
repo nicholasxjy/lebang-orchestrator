@@ -4,3 +4,6 @@
 target/
 node_modules/
 coverage/
+REVIEW.md
+DESIGN.md
+

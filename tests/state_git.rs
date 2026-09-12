@@ -184,6 +184,100 @@ fn init_repo(path: &Path) {
     git(path, &["commit", "-m", "base"]);
 }
 
+#[tokio::test]
+async fn integration_recovers_commits_applied_before_state_was_saved() {
+    let root = tempdir().unwrap();
+    init_repo(root.path());
+    let base = git(root.path(), &["rev-parse", "HEAD"]);
+    let manager = GitManager::new(root.path(), root.path().join(".worktrees"));
+    let mut first = task("T1");
+    let snapshot = first.clone();
+    let path = manager
+        .prepare_task_worktree(&mut first, &[snapshot], &base)
+        .await
+        .unwrap();
+    fs::write(path.join("feature.txt"), "done\n").unwrap();
+    git(&path, &["add", "feature.txt"]);
+    git(&path, &["commit", "-m", "feature"]);
+    first.commit = Some(git(&path, &["rev-parse", "HEAD"]));
+    first.status = TaskStatus::Approved;
+    let (integration, commits) = manager
+        .prepare_integration_worktree(
+            &[first.clone()],
+            &base,
+            "run1",
+            "duncan",
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+    let head = git(&integration, &["rev-parse", "HEAD"]);
+    let (resumed, resumed_commits) = manager
+        .prepare_integration_worktree(&[first], &base, "run1", "duncan", &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(resumed, integration);
+    assert_eq!(resumed_commits, commits);
+    assert_eq!(git(&resumed, &["rev-parse", "HEAD"]), head);
+    assert!(manager.head_is_clean(&resumed).await.unwrap());
+}
+
+#[tokio::test]
+async fn missing_recorded_task_worktree_preserves_its_original_base() {
+    let root = tempdir().unwrap();
+    init_repo(root.path());
+    let base = git(root.path(), &["rev-parse", "HEAD"]);
+    let manager = GitManager::new(root.path(), root.path().join(".worktrees"));
+    let mut first = task("T1");
+    let snapshot = first.clone();
+    let path = manager
+        .prepare_task_worktree(&mut first, &[snapshot], &base)
+        .await
+        .unwrap();
+    fs::write(path.join("feature.txt"), "done\n").unwrap();
+    git(&path, &["add", "feature.txt"]);
+    git(&path, &["commit", "-m", "feature"]);
+    first.commit = Some(git(&path, &["rev-parse", "HEAD"]));
+    fs::remove_dir_all(&path).unwrap();
+    let snapshot = first.clone();
+    manager
+        .prepare_task_worktree(&mut first, &[snapshot], &base)
+        .await
+        .unwrap();
+    assert_eq!(first.base_commit.as_deref(), Some(base.as_str()));
+    assert_eq!(
+        manager.changed_files(&first).await.unwrap(),
+        ["feature.txt"]
+    );
+}
+
+#[tokio::test]
+async fn cleanliness_does_not_accept_a_git_error() {
+    let root = tempdir().unwrap();
+    let manager = GitManager::new(root.path(), root.path().join(".worktrees"));
+    assert!(manager.head_is_clean(root.path()).await.is_err());
+}
+
+#[tokio::test]
+async fn changed_files_preserves_unicode_and_whitespace_in_paths() {
+    let root = tempdir().unwrap();
+    init_repo(root.path());
+    let base = git(root.path(), &["rev-parse", "HEAD"]);
+    let manager = GitManager::new(root.path(), root.path().join(".worktrees"));
+    let names = [" 文档.md", "测试.rs", "line\nbreak.txt"];
+    for name in names {
+        fs::write(root.path().join(name), "content").unwrap();
+    }
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "paths"]);
+    let head = git(root.path(), &["rev-parse", "HEAD"]);
+    let mut changed = manager.changed_files_between(&base, &head).await.unwrap();
+    changed.sort();
+    let mut expected = names.map(String::from).to_vec();
+    expected.sort();
+    assert_eq!(changed, expected);
+}
+
 fn git(path: &Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .args(args)

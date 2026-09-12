@@ -1,15 +1,15 @@
 # lebang
 
-`lebang` is a single Rust binary for running a small Codex team in Herdr. It turns one goal into a persisted task DAG, gives coder tasks isolated Git worktrees, gates every task through testing and review, and integrates approved commits in a separate worktree.
+`lebang` is a single Rust binary for running mixed Codex, OpenCode, Pi, and Gemini teams in Herdr, with Claude Code support also retained. Each identity can select its own agent type and model. It turns one goal into a persisted task DAG, gives coder tasks isolated Git worktrees, gates every task through testing and review, and integrates approved commits in a separate worktree.
 
-There is no Node.js runtime, npm package, Pi extension, or SDK fallback.
+Lebang itself is a standalone Rust binary; agent CLIs run as separate processes.
 
 ## Requirements
 
-- Rust stable, for installation from source
+- Rust 1.89 or newer, for installation from source
 - Git
 - Herdr with `pane split`, `pane rename`, and named `agent` commands
-- Codex CLI available to Herdr
+- The configured CLIs (`codex`, `opencode`, `pi`, `gemini`, `claude`) installed and authenticated in Herdr's shell environment
 
 The implementation baseline is Herdr 0.8.0 and Codex CLI 0.147.0. Runtime checks use capabilities and readable command errors rather than rejecting other versions by version number.
 
@@ -31,11 +31,13 @@ lebang init
 
 This creates `.orchestrator/config.toml` once. Existing files are never overwritten, and `init` does not require a Herdr session. Before planning, review every agent's model, mode, thinking effort, Skill, worker limits, and validation commands.
 
-The generated schema is fixed:
+The generated configuration defaults to an all-Codex roster and remains compatible with existing configurations:
 
 ```toml
 max_workers = 1
 max_review_attempts = 3
+agent_timeout_seconds = 3600
+validation_timeout_seconds = 3600
 validation_commands = [
   ["git", "diff", "--check"],
 ]
@@ -84,9 +86,36 @@ thinking = "high"
 skill = "integrator"
 ```
 
-Agent identities must match Herdr's `[a-z][a-z0-9_-]{0,31}` rule. A roster must contain exactly one planner, tester, reviewer, and integrator, plus at least one coder. Version 1 accepts only `agent = "codex"`; mode is `build` or `plan`; thinking is `minimal`, `low`, `medium`, `high`, or `xhigh`.
+Agent identities and Skill names must match `[a-z][a-z0-9_-]{0,31}`. A roster must contain exactly one planner, tester, reviewer, and integrator, plus at least one coder. Each identity independently chooses `agent = "codex"`, `"opencode"`, `"pi"`, `"gemini"`, or `"claude"`. Mode is `build` or `plan` and is supplied through role instructions. Omit `thinking` or set it to `"default"` to use the native CLI/model configuration.
 
-The bundled model value is an example. Availability depends on the user's Codex account. Codex is launched with explicit `--model`, `--cd`, `--no-alt-screen`, sandbox, and approval flags, plus `developer_instructions`, `model_reasoning_effort`, and `plan_mode_reasoning_effort` config overrides. Planner, reviewer, and integrator use a read-only sandbox; coder and tester use workspace-write; approval is `never` for unattended runs.
+| Agent type | Thinking values | Native configuration |
+| --- | --- | --- |
+| `codex` | `minimal`, `low`, `medium`, `high`, `xhigh` | `--model`, `-c model_reasoning_effort`, `--cd`, role sandbox |
+| `opencode` | `minimal`, `low`, `medium`, `high`, `xhigh` | `--model provider/model`, named primary agent, scoped inline configuration; explicit thinking becomes the provider's `reasoningEffort` option |
+| `pi` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | `--model` (also accepts `provider/model`), `--thinking`, `--append-system-prompt`, role tool allowlist |
+| `gemini` | `default` only | `--model`, role policy file, instructions included with every task prompt; thinking remains controlled by Gemini's native model configuration |
+| `claude` | `low`, `medium`, `high`, `xhigh`, `max` | `--model`, `--effort`, `--append-system-prompt-file`, explicit tools and `dontAsk` permissions |
+
+All types accept `default`. Model availability and supported effort levels depend on the installed CLI and account. OpenCode explicit thinking is intended for providers that support `reasoningEffort` (such as OpenAI); omit it for other providers. Unsupported agent types or type/effort combinations fail during configuration parsing. Both timeout settings are positive seconds, defaulting to 3600 when omitted.
+
+For a complete six-person Codex + OpenCode + Pi + Gemini team with two concurrent coders, use [examples/mixed-agents.toml](examples/mixed-agents.toml). It assigns Codex to planning/integration, OpenCode and Pi to coding, Pi to testing, and Gemini to review. Set real validation commands for the target repository before running:
+
+```sh
+lebang --config /path/to/mixed-agents.toml plan "implement the goal"
+lebang --config /path/to/mixed-agents.toml run
+```
+
+Use the same configuration for subsequent lifecycle commands. A recorded layout must match its repository, tab, identities, and complete configuration; mismatches fail before prompting an agent.
+
+Codex is launched with explicit `--model`, `--cd`, `--no-alt-screen`, sandbox, and approval flags, plus `developer_instructions`, `model_reasoning_effort`, and `plan_mode_reasoning_effort` config overrides. Planner, reviewer, and integrator use a read-only sandbox; coder and tester use workspace-write; approval is `never` for unattended runs.
+
+Claude Code receives its instructions through a file so multiline Skills survive Herdr's shell argument encoding. Read-only roles receive `Read,Glob,Grep`; coder and tester additionally receive `Bash,Edit,Write`. `dontAsk` denies unapproved operations without prompting, and these selected tools are explicitly allowed. MCP tools are disabled for these sessions. These are Claude tool permissions, not a Codex filesystem sandbox. Its native flags follow the [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference).
+
+OpenCode receives a generated named primary agent through `OPENCODE_CONFIG_CONTENT` in its own pane. Existing inline provider settings are preserved; the generated agent supplies role instructions and denies tools outside its allowlist. Native options follow the [OpenCode CLI](https://opencode.ai/docs/cli/) and [agent configuration](https://opencode.ai/docs/agents/) documentation.
+
+Pi receives an appended prompt file and an explicit tool allowlist: read/grep/find/ls for read-only roles, plus bash/edit/write for coders and testers. `--approve` trusts the selected project for that session, preventing a project-trust question during an unattended start. Native options follow the [Pi CLI documentation](https://github.com/earendil-works/pi/tree/main/packages/coding-agent).
+
+Gemini uses `--policy` with a generated role allowlist and `--approval-mode default`; every task prompt includes the role Skill. `--skip-trust` trusts the selected workspace for that session. The adapter preserves Gemini's existing settings and system prompt. It requires a CLI exposing these flags, as documented in the [native argument parser](https://github.com/google-gemini/gemini-cli/blob/main/packages/cli/src/config/config.ts) and [policy engine](https://geminicli.com/docs/reference/policy-engine/). OpenCode, Pi, Gemini, and Claude use native tool permissions; only Codex's adapter configures a filesystem sandbox.
 
 ## Commands
 
@@ -143,9 +172,17 @@ herdr agent prompt lebang "summarize the plan" --wait
 herdr agent prompt kd "report current task state" --wait
 ```
 
-The normalized roster and pane IDs are saved in `.orchestrator/herdr-layout.json`. A retry in the same repository and tab can reuse a complete matching layout. If a task agent exited after a failed execution, retry restarts it with its most recent Codex session in the same worktree so it can continue from the previous context. A live same-name agent in another repository, tab, pane, or incompatible roster is reported as a conflict. If bootstrap fails, only panes created by that attempt are closed. Once the complete team is recorded, planner or later failures leave the team open for inspection and retry.
+The normalized roster and pane IDs are saved in `.orchestrator/herdr-layout.json`. A retry in the same repository and tab can reuse a complete matching layout. Native session references reported by Herdr are stored in `.orchestrator/agent-sessions.json`, keyed by agent type, identity, and working directory. Both ID and file references are supported for Pi and Gemini; older bare-ID records remain readable. An exited agent resumes that specific session; if no supported reference was reported, it starts fresh with the task context. A live same-name agent in another pane or of another type is reported as a conflict. An agent still working or awaiting input is not sent an overlapping retry. If bootstrap fails, only panes created by that attempt are closed. Once the complete team is recorded, planner or later failures leave the team open for inspection and retry.
 
-Agents are started one at a time, and each start gives Herdr 120 seconds to detect Codex readiness. Codex model and thinking state are then checked in the footer. Plan/build behavior is passed through developer instructions because current Codex versions no longer expose the collaboration-mode toggle. Coder and tester sessions also receive the repository `.git` directory through Codex `--add-dir`, allowing commits from linked task worktrees without granting write access to the main checkout. When a task moves an identity to a task or integration worktree, `lebang` exits Codex with `/quit` and starts it again in the same named pane with the new `--cd`. Per-identity async locks allow different coders to run concurrently while preventing one tester, reviewer, or other identity from receiving overlapping prompts or changing cwd mid-turn.
+Agents are started one at a time, and each start gives Herdr 120 seconds to detect readiness. Codex's explicit model/thinking settings are checked in the footer; other types use Herdr's agent detection. Writable roles receive access to shared Git metadata through the native adapter where required. Rebinding exits Codex, Pi, and Gemini with `/quit`, or OpenCode and Claude with `/exit`. Codex uses `--cd`; other types wait for the pane's shell, change its cwd with a quoted `cd`, verify cwd, and then start. Per-identity async locks prevent overlapping prompts; a repository-level file lock prevents separate CLI commands from concurrently mutating the same run. Read-only commands remain available.
+
+| Type | Resume argument |
+| --- | --- |
+| Codex | `resume ID` |
+| OpenCode | `--session ID` |
+| Pi | `--session ID_OR_FILE` |
+| Gemini | `--resume ID` or `--session-file FILE` |
+| Claude Code | `--resume ID` |
 
 ## Lifecycle and worktrees
 
@@ -175,7 +212,9 @@ branch:   orchestrator/<run-id>/integration
 worktree: .worktrees/<run-id>-<integrator>
 ```
 
-Only approved task commit ranges are integrated in DAG order. Every configured validation command runs in the integration worktree before the integrator can report completion.
+Only approved task commit ranges are integrated in DAG order. Repeated integration verifies the already applied prefix against approved patches, so a crash before JSON state is saved does not duplicate commits. A failed cherry-pick is aborted while preserving earlier successful picks. Every configured validation command runs in the integration worktree before the integrator can report completion. Missing commands, failures, and timeouts are persisted as failed validation evidence. Validation and review must leave the tested commit and worktree unchanged.
+
+Independent test failures cannot be approved. Test-only rework includes the reviewer's issues in the tester prompt. Replanning waits for the active batch to finish, reloads current task evidence, preserves approved/completed tasks, and requires fresh IDs for replacement tasks.
 
 ## Persistence and recovery
 
@@ -185,6 +224,10 @@ State is human-readable under `.orchestrator/`:
 .orchestrator/
 ├── config.toml
 ├── herdr-layout.json
+├── agent-sessions.json
+├── agent-prompts/<identity>.txt
+├── agent-config/<identity>.opencode.json
+├── agent-config/<identity>.gemini.toml
 ├── plan.json
 ├── state.json
 ├── tasks/<task-id>.json
@@ -195,7 +238,7 @@ State is human-readable under `.orchestrator/`:
 └── locks/<task-id>.lock
 ```
 
-Plan, state, task, history, log metadata, and run records preserve the existing camelCase JSON protocol. Fixtures produced by the earlier Python/TypeScript implementations are read by the Rust version. JSON snapshots use atomic temporary-file replacement; history is append-only JSONL; task locks use exclusive creation and recover dead-owner PIDs.
+Plan, state, task, history, log metadata, and run records preserve the existing camelCase JSON protocol. Run records now also include `agentKind`; older records without it remain readable. Fixtures produced by the earlier Python/TypeScript implementations are read by the Rust version. JSON snapshots use atomic temporary-file replacement; initialization publishes the plan only after task and state snapshots exist. History is append-only JSONL; task locks recover dead-owner PIDs, and the orchestration lock is automatically released by the OS on process exit.
 
 Useful recovery commands:
 
@@ -212,7 +255,7 @@ lebang integrate
 
 ## Role Skills
 
-Planner, coder, tester, reviewer, and integrator Skills are compiled into the binary. A repository may override one with `.skills/<skill>/SKILL.md`. The role Skill, identity, role, and full roster are injected through Codex `developer_instructions` on every start.
+Planner, coder, tester, reviewer, and integrator Skills are compiled into the binary. A repository may override one with `.skills/<skill>/SKILL.md`. The role Skill, identity, role, and full roster are passed through Codex developer instructions, OpenCode's agent prompt, Pi/Claude appended prompts, or every Gemini task prompt.
 
 ## Development
 
@@ -225,7 +268,7 @@ cargo test
 cargo build --release
 ```
 
-Tests use temporary Git repositories, the in-memory `AgentRuntime` adapter, and fake Herdr executables. They do not require a live Herdr session. A real Herdr smoke test remains an explicit manual/opt-in acceptance step because it changes the current terminal layout.
+Tests require Git, a POSIX shell, and Python 3 for executable Herdr fixtures. They use temporary Git repositories and the in-memory `AgentRuntime` adapter and do not require a live Herdr session. A real Herdr smoke test remains an explicit manual/opt-in acceptance step because it changes the current terminal layout.
 
 From a Herdr shell, opt in with an initialized disposable repository:
 

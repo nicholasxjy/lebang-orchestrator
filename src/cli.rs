@@ -19,7 +19,7 @@ use crate::{
 #[command(
     name = "lebang",
     version,
-    about = "Git-native Codex team orchestration through Herdr"
+    about = "Git-native mixed-agent team orchestration through Herdr"
 )]
 pub struct Cli {
     #[arg(long, global = true, value_name = "PATH")]

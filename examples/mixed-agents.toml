@@ -1,0 +1,58 @@
+# Codex + OpenCode + Pi + Gemini. Models are examples; choose available models.
+# Invoke with: lebang --config /path/to/mixed-agents.toml plan "your goal"
+max_workers = 2
+max_review_attempts = 3
+agent_timeout_seconds = 3600
+validation_timeout_seconds = 3600
+validation_commands = [["git", "diff", "--check"]]
+
+[herdr]
+command = "herdr"
+
+[agents.lebang]
+role = "planner"
+agent = "codex"
+model = "gpt-5.6-sol"
+mode = "plan"
+thinking = "high"
+skill = "planner"
+
+[agents.kd]
+role = "coder"
+agent = "opencode"
+model = "openai/gpt-5"
+mode = "build"
+thinking = "medium"
+skill = "coder"
+
+[agents.harden]
+role = "coder"
+agent = "pi"
+model = "google/gemini-2.5-pro"
+mode = "build"
+thinking = "medium"
+skill = "coder"
+
+[agents.westbrook]
+role = "tester"
+agent = "pi"
+model = "google/gemini-2.5-pro"
+mode = "build"
+thinking = "medium"
+skill = "tester"
+
+[agents.curry]
+role = "reviewer"
+agent = "gemini"
+model = "gemini-2.5-pro"
+mode = "plan"
+# Gemini uses its native thinking configuration; omit thinking or use "default".
+skill = "reviewer"
+
+[agents.duncan]
+role = "integrator"
+agent = "codex"
+model = "gpt-5.6-sol"
+mode = "build"
+thinking = "high"
+skill = "integrator"

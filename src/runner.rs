@@ -70,17 +70,32 @@ impl AgentRunner {
         &self,
         request: AgentRunRequest,
     ) -> Result<(T, AgentRunArtifact), RunnerError> {
-        let failed_run = self.store.latest_failed_run(
-            &request.task_id,
-            request.agent.role.as_str(),
-            &request.agent.identity,
-        )?;
+        let failed_run = self
+            .store
+            .latest_failed_run(
+                &request.task_id,
+                request.agent.role.as_str(),
+                &request.agent.identity,
+            )?
+            .filter(|record| {
+                Path::new(&record.cwd) == request.cwd
+                    && record.model == request.agent.model
+                    && record.agent_kind.unwrap_or(crate::config::AgentKind::Codex)
+                        == request.agent.agent
+            });
         let resume_session = failed_run.is_some();
         let prompt = if failed_run
             .as_ref()
             .is_some_and(|record| record.stderr.contains(MISSING_MARKED_RESULT))
         {
-            marked_result_recovery_prompt()
+            match request.prompt.split_once("Context:\n") {
+                Some((_, context)) => format!(
+                    "{}\n\nOriginal context and result contract (reference only):\n{}",
+                    marked_result_recovery_prompt(),
+                    context
+                ),
+                None => marked_result_recovery_prompt(),
+            }
         } else {
             request.prompt
         };
@@ -131,6 +146,7 @@ impl AgentRunner {
             run_id: run_id.clone(),
             task_id: request.task_id.clone(),
             agent: request.agent.identity.clone(),
+            agent_kind: Some(request.agent.agent),
             role: request.agent.role.as_str().into(),
             model: request.agent.model.clone(),
             cwd: request.cwd.display().to_string(),

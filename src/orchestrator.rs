@@ -19,7 +19,7 @@ use crate::{
     },
     prompts::{
         coder_prompt, integrator_prompt, planner_prompt, replan_prompt, reviewer_prompt,
-        tester_prompt,
+        tester_rework_prompt,
     },
     runner::{AgentRunRequest, AgentRunner, RunnerError},
     runtime::{AgentRuntime, HerdrRuntime, RuntimeError},
@@ -70,7 +70,9 @@ impl Orchestrator {
     ) -> Self {
         let repo_root = absolute(repo_root.as_ref());
         let store = RunStore::new(repo_root.join(".orchestrator"));
-        let runner = AgentRunner::new(&repo_root, store.clone(), runtime.clone());
+        let runner = AgentRunner::new(&repo_root, store.clone(), runtime.clone()).with_timeout(
+            std::time::Duration::from_secs(config.agent_timeout_seconds.into()),
+        );
         Self {
             git: GitManager::new(&repo_root, repo_root.join(".worktrees")),
             repo_root,
@@ -82,6 +84,7 @@ impl Orchestrator {
     }
 
     pub async fn plan_goal(&self, goal: &str) -> Result<Plan, OrchestratorError> {
+        let _run_lock = self.store.acquire_run_lock()?;
         if goal.trim().is_empty() {
             return Err(OrchestratorError::Invalid("goal must not be empty".into()));
         }
@@ -124,12 +127,20 @@ impl Orchestrator {
         }
         self.assign_unowned_tasks(&mut plan.tasks);
         self.validate_planned_tasks(&plan.tasks)?;
+        for task in &plan.tasks {
+            validate_new_task(task)?;
+        }
         plan.validate()?;
         self.store.initialize(&plan)?;
         Ok(plan)
     }
 
     pub async fn run(&self) -> Result<RunResult, OrchestratorError> {
+        let _run_lock = self.store.acquire_run_lock()?;
+        self.run_inner().await
+    }
+
+    async fn run_inner(&self) -> Result<RunResult, OrchestratorError> {
         if !self.store.root.join("plan.json").exists()
             || !self.store.root.join("state.json").exists()
         {
@@ -152,6 +163,11 @@ impl Orchestrator {
 
         loop {
             let mut plan = self.store.load_plan()?;
+            self.validate_planned_tasks(&plan.tasks)?;
+            if let Some(review) = self.pending_replan(&plan)? {
+                self.handle_replan(&plan, &review).await?;
+                continue;
+            }
             let active = plan
                 .tasks
                 .iter()
@@ -162,7 +178,7 @@ impl Orchestrator {
                     .iter()
                     .all(|task| matches!(task.status, TaskStatus::Approved | TaskStatus::Completed))
             {
-                return self.integrate().await;
+                return self.integrate_inner().await;
             }
             for task_id in ready_task_ids(&plan.tasks) {
                 let task = find_task_mut(&mut plan, &task_id)?;
@@ -195,21 +211,22 @@ impl Orchestrator {
                         break;
                     }
                 }
-                join_all(batch.iter().map(|task_id| self.execute_task(task_id))).await;
+                for outcome in
+                    join_all(batch.iter().map(|task_id| self.execute_task(task_id))).await
+                {
+                    outcome?;
+                }
                 continue;
             }
             return self.terminal_result(&plan);
         }
     }
 
-    async fn execute_task(&self, task_id: &str) {
+    async fn execute_task(&self, task_id: &str) -> Result<(), OrchestratorError> {
+        let _lock = self.store.acquire_task_lock(task_id)?;
         if let Err(error) = self.execute_task_inner(task_id).await {
-            let Ok(plan) = self.store.load_plan() else {
-                return;
-            };
-            let Some(mut task) = plan.tasks.into_iter().find(|task| task.id == task_id) else {
-                return;
-            };
+            let plan = self.store.load_plan()?;
+            let mut task = find_task(&plan, task_id)?.clone();
             let agent = task
                 .assigned_agent
                 .clone()
@@ -220,27 +237,27 @@ impl Orchestrator {
                 })
                 .unwrap_or_else(|| "lebang".into());
             if allowed_transition(task.status, TaskStatus::Failed) {
-                let _ = transition_task(
+                transition_task(
                     &self.store,
                     &mut task,
                     TaskStatus::Failed,
                     &agent,
                     &error.to_string(),
-                );
+                )?;
             } else {
-                let _ = self.store.append_history(
+                self.store.append_history(
                     task_id,
                     &json!({
                         "event": "execution_error", "agent": agent,
                         "reason": error.to_string(),
                     }),
-                );
+                )?;
             }
         }
+        Ok(())
     }
 
     async fn execute_task_inner(&self, task_id: &str) -> Result<(), OrchestratorError> {
-        let _lock = self.store.acquire_task_lock(task_id)?;
         let plan = self.store.load_plan()?;
         let mut task = find_task(&plan, task_id)?.clone();
         if task.status != TaskStatus::Ready {
@@ -376,8 +393,26 @@ impl Orchestrator {
                 "coder returned with uncommitted worktree changes".into(),
             ));
         }
+        self.validate_coder_commit(task, result).await?;
         task.commit = Some(head);
-        let changed_files = self.git.changed_files(task).await?;
+        self.store.save_task(task)?;
+        Ok(())
+    }
+
+    async fn validate_coder_commit(
+        &self,
+        task: &Task,
+        result: &CoderResult,
+    ) -> Result<(), OrchestratorError> {
+        result.validate()?;
+        if result.task_id != task.id || result.status != LifecycleResultStatus::Completed {
+            return Err(OrchestratorError::Invalid(
+                "coder evidence does not complete this task".into(),
+            ));
+        }
+        let mut evidence = task.clone();
+        evidence.commit = result.commit.clone();
+        let changed_files = self.git.changed_files(&evidence).await?;
         if !same_set(&changed_files, &result.changed_files) {
             return Err(OrchestratorError::Invalid(
                 "coder changedFiles does not match the committed task diff".into(),
@@ -406,6 +441,45 @@ impl Orchestrator {
                 "coder completed without reporting self-test commands".into(),
             ));
         }
+        Ok(())
+    }
+
+    async fn recover_coder_evidence(
+        &self,
+        task: &mut Task,
+        worktree: &Path,
+        coder: &CoderResult,
+    ) -> Result<(), OrchestratorError> {
+        let head = self.git.current_commit(worktree).await?;
+        if coder.commit.as_deref() == Some(head.as_str()) {
+            return self.accept_coder_evidence(task, worktree, coder).await;
+        }
+        self.validate_coder_commit(task, coder).await?;
+        let tested = self
+            .store
+            .latest_structured_result::<TestResult>(&task.id, "tester")?
+            .ok_or_else(|| {
+                OrchestratorError::Invalid(
+                    "no recoverable tester evidence for the current HEAD".into(),
+                )
+            })?;
+        if tested.task_id != task.id
+            || tested.commit.as_deref() != Some(head.as_str())
+            || !self.git.head_is_clean(worktree).await?
+        {
+            return Err(OrchestratorError::Invalid(
+                "tester evidence does not match the clean current HEAD".into(),
+            ));
+        }
+        let base = coder.commit.as_deref().expect("validated coder commit");
+        self.git.require_ancestor(base, &head).await?;
+        let changed = self.git.changed_files_between(base, &head).await?;
+        if !changed.iter().all(|path| is_test_support_path(path)) {
+            return Err(OrchestratorError::Invalid(
+                "recovered tester commits contain production changes".into(),
+            ));
+        }
+        task.commit = Some(head);
         self.store.save_task(task)?;
         Ok(())
     }
@@ -416,6 +490,7 @@ impl Orchestrator {
         task: &mut Task,
         worktree: &Path,
         coder: &CoderResult,
+        rework_issues: &[Issue],
     ) -> Result<TestResult, OrchestratorError> {
         let tester = self.agent_for(Role::Tester)?.clone();
         let before = task.commit.clone().ok_or_else(|| {
@@ -428,7 +503,7 @@ impl Orchestrator {
                 agent: tester.clone(),
                 task_id: task.id.clone(),
                 cwd: worktree.to_path_buf(),
-                prompt: tester_prompt(&plan.goal, task, coder, &diff),
+                prompt: tester_rework_prompt(&plan.goal, task, coder, &diff, rework_issues),
                 state_transition: Some("testing -> reviewing".into()),
             })
             .await?;
@@ -438,7 +513,7 @@ impl Orchestrator {
                 result.task_id, task.id
             )));
         }
-        if result.tests_executed.is_empty() {
+        if result.tests_executed.is_empty() && result.status != TestStatus::Blocked {
             return Err(OrchestratorError::Invalid(
                 "tester returned without independent test commands".into(),
             ));
@@ -458,8 +533,9 @@ impl Orchestrator {
                         "tester commit does not match a clean worktree HEAD".into(),
                     ));
                 }
+                self.git.require_ancestor(&before, &after).await?;
                 let changed = self.git.changed_files_between(&before, &after).await?;
-                if !changed.iter().all(|path| result.tests_added.contains(path)) {
+                if !same_set(&changed, &result.tests_added) {
                     return Err(OrchestratorError::Invalid(
                         "tester commit contains files not declared in testsAdded".into(),
                     ));
@@ -526,6 +602,18 @@ impl Orchestrator {
                 result.task_id, task.id
             )));
         }
+        if self.git.current_commit(worktree).await?.as_str() != task.commit.as_deref().unwrap_or("")
+            || !self.git.head_is_clean(worktree).await?
+        {
+            return Err(OrchestratorError::Invalid(
+                "reviewer changed the tested commit or worktree".into(),
+            ));
+        }
+        if result.status == ReviewStatus::Approved && test.status != TestStatus::Passed {
+            return Err(OrchestratorError::Invalid(
+                "reviewer cannot approve failed independent tests".into(),
+            ));
+        }
         Ok(result)
     }
 
@@ -537,8 +625,11 @@ impl Orchestrator {
         coder: &AgentConfig,
         mut coder_result: CoderResult,
     ) -> Result<(), OrchestratorError> {
+        let mut rework_issues = Vec::new();
         while task.status == TaskStatus::Testing {
-            let test = self.run_tester(plan, task, worktree, &coder_result).await?;
+            let test = self
+                .run_tester(plan, task, worktree, &coder_result, &rework_issues)
+                .await?;
             if task.status != TaskStatus::Reviewing {
                 return Ok(());
             }
@@ -568,7 +659,13 @@ impl Orchestrator {
                 return Ok(());
             }
             if review.status == ReviewStatus::ReplanRequired {
-                self.handle_replan(plan, &review).await?;
+                transition_task(
+                    &self.store,
+                    task,
+                    TaskStatus::Blocked,
+                    &self.agent_for(Role::Planner)?.identity,
+                    "task requested replanning; waiting for the current batch",
+                )?;
                 return Ok(());
             }
             transition_task(
@@ -584,6 +681,7 @@ impl Orchestrator {
                     .iter()
                     .all(|issue| issue.scope == IssueScope::Test);
             if test_only {
+                rework_issues = review.issues.clone();
                 let tester = self.agent_for(Role::Tester)?;
                 transition_task(
                     &self.store,
@@ -615,11 +713,14 @@ impl Orchestrator {
                 .collect::<Result<Vec<_>, _>>()
                 .expect("issues serialize");
             coder_result = self.run_coder(plan, task, worktree, coder, &issues).await?;
+            rework_issues.clear();
         }
         Ok(())
     }
 
     pub async fn retry(&self, task_id: &str) -> Result<(), OrchestratorError> {
+        let _run_lock = self.store.acquire_run_lock()?;
+        let _task_lock = self.store.acquire_task_lock(task_id)?;
         let plan = self.store.load_plan()?;
         let mut task = find_task(&plan, task_id)?.clone();
         if !matches!(
@@ -672,7 +773,7 @@ impl Orchestrator {
             .latest_structured_result::<CoderResult>(&task.id, "coder")?;
         if let (Some(result), Some(worktree)) = (&coder_result, task.worktree.clone())
             && self
-                .accept_coder_evidence(&mut task, Path::new(&worktree), result)
+                .recover_coder_evidence(&mut task, Path::new(&worktree), result)
                 .await
                 .is_err()
         {
@@ -723,6 +824,8 @@ impl Orchestrator {
     }
 
     pub async fn review_task(&self, task_id: &str) -> Result<(), OrchestratorError> {
+        let _run_lock = self.store.acquire_run_lock()?;
+        let _task_lock = self.store.acquire_task_lock(task_id)?;
         let plan = self.store.load_plan()?;
         let mut task = find_task(&plan, task_id)?.clone();
         if task.status != TaskStatus::Reviewing {
@@ -747,6 +850,8 @@ impl Orchestrator {
                 task.id
             ))
         })?;
+        self.recover_coder_evidence(&mut task, Path::new(&worktree), &coder)
+            .await?;
         transition_task(
             &self.store,
             &mut task,
@@ -772,6 +877,7 @@ impl Orchestrator {
     }
 
     pub async fn resume(&self) -> Result<RunResult, OrchestratorError> {
+        let _run_lock = self.store.acquire_run_lock()?;
         let plan = self.store.load_plan()?;
         let state = self.store.load_state()?;
         if plan
@@ -780,7 +886,7 @@ impl Orchestrator {
             .any(|task| task.status == TaskStatus::Integrating)
             || state.status == RunStatus::FinalValidating
         {
-            return self.integrate().await;
+            return self.integrate_inner().await;
         }
         let planner = self.agent_for(Role::Planner)?.identity.clone();
         for snapshot in plan.tasks {
@@ -811,7 +917,12 @@ impl Orchestrator {
             }
             if !matches!(
                 original,
-                TaskStatus::Running | TaskStatus::SelfVerifying | TaskStatus::Testing
+                TaskStatus::Running
+                    | TaskStatus::SelfVerifying
+                    | TaskStatus::Testing
+                    | TaskStatus::Reviewing
+                    | TaskStatus::Interrupted
+                    | TaskStatus::Reworking
             ) {
                 continue;
             }
@@ -825,7 +936,7 @@ impl Orchestrator {
                 continue;
             };
             if self
-                .accept_coder_evidence(&mut task, Path::new(&worktree), &coder)
+                .recover_coder_evidence(&mut task, Path::new(&worktree), &coder)
                 .await
                 .is_err()
             {
@@ -861,10 +972,15 @@ impl Orchestrator {
             state.result = None;
             self.store.save_state(&state)?;
         }
-        self.run().await
+        self.run_inner().await
     }
 
     pub async fn integrate(&self) -> Result<RunResult, OrchestratorError> {
+        let _run_lock = self.store.acquire_run_lock()?;
+        self.integrate_inner().await
+    }
+
+    async fn integrate_inner(&self) -> Result<RunResult, OrchestratorError> {
         let mut stored_plan = self.store.load_plan()?;
         let active = stored_plan
             .tasks
@@ -938,9 +1054,30 @@ impl Orchestrator {
         state.integration_worktree = Some(integration_path.display().to_string());
         state.integrated_commits = commits.clone();
         self.store.save_state(&state)?;
+        let validated_head = self.git.current_commit(&integration_path).await?;
         let mut validations = Vec::new();
         for command in &self.config.validation_commands {
             validations.push(self.run_validation(command, &integration_path).await?);
+        }
+        if validations.iter().any(|result| result.exit_code != 0) {
+            return self.integration_failure(
+                &plan,
+                &integrator,
+                "repository validation failed",
+                commits,
+                validations,
+            );
+        }
+        if self.git.current_commit(&integration_path).await? != validated_head
+            || !self.git.head_is_clean(&integration_path).await?
+        {
+            return self.integration_failure(
+                &plan,
+                &integrator,
+                "validation changed the integrated commit or left uncommitted changes",
+                commits,
+                validations,
+            );
         }
         let branch = state
             .integration_branch
@@ -951,7 +1088,7 @@ impl Orchestrator {
             .run::<RunResult>(AgentRunRequest {
                 agent: integrator.clone(),
                 task_id: "INTEGRATION".into(),
-                cwd: integration_path,
+                cwd: integration_path.clone(),
                 prompt: integrator_prompt(&plan.goal, &plan, &commits, &validations, &branch),
                 state_transition: Some("final_validating -> completed".into()),
             })
@@ -973,6 +1110,17 @@ impl Orchestrator {
                 &plan,
                 &integrator,
                 "integrator result does not match integration evidence",
+                commits,
+                validations,
+            );
+        }
+        if self.git.current_commit(&integration_path).await? != validated_head
+            || !self.git.head_is_clean(&integration_path).await?
+        {
+            return self.integration_failure(
+                &plan,
+                &integrator,
+                "integrator changed the validated commit or worktree",
                 commits,
                 validations,
             );
@@ -1083,6 +1231,50 @@ impl Orchestrator {
         }
         self.assign_unowned_tasks(&mut replanned.tasks);
         self.validate_planned_tasks(&replanned.tasks)?;
+        for old in &current.tasks {
+            let next = replanned.tasks.iter_mut().find(|task| task.id == old.id);
+            if matches!(old.status, TaskStatus::Approved | TaskStatus::Completed) {
+                if next.as_deref() != Some(old) {
+                    return Err(OrchestratorError::Invalid(format!(
+                        "replan must preserve approved task {} and its evidence",
+                        old.id
+                    )));
+                }
+            } else if let Some(next) = next {
+                if next.status == TaskStatus::Invalidated {
+                    *next = old.clone();
+                    next.status = TaskStatus::Invalidated;
+                } else if next != old {
+                    return Err(OrchestratorError::Invalid(format!(
+                        "replan must use a new task id to replace {}",
+                        old.id
+                    )));
+                }
+            }
+        }
+        for task in &replanned.tasks {
+            if !current.tasks.iter().any(|old| old.id == task.id) {
+                validate_new_task(task)?;
+            }
+            if task.status != TaskStatus::Invalidated
+                && task.dependencies.iter().any(|id| {
+                    !replanned
+                        .tasks
+                        .iter()
+                        .any(|dep| &dep.id == id && dep.status != TaskStatus::Invalidated)
+                })
+            {
+                return Err(OrchestratorError::Invalid(format!(
+                    "replanned task {} depends on a removed or invalidated task",
+                    task.id
+                )));
+            }
+        }
+        if replanned == *current {
+            return Err(OrchestratorError::Invalid(
+                "replan did not change the task DAG".into(),
+            ));
+        }
         let reason = review
             .issues
             .iter()
@@ -1098,16 +1290,73 @@ impl Orchestrator {
         Ok(())
     }
 
+    fn pending_replan(&self, plan: &Plan) -> Result<Option<ReviewResult>, OrchestratorError> {
+        for task in &plan.tasks {
+            if task.status == TaskStatus::Blocked
+                && task.review_attempts < self.config.max_review_attempts
+                && let Some(review) = self
+                    .store
+                    .latest_structured_result::<ReviewResult>(&task.id, "reviewer")?
+                && review.status == ReviewStatus::ReplanRequired
+            {
+                return Ok(Some(review));
+            }
+        }
+        Ok(None)
+    }
+
     async fn run_validation(
         &self,
         command: &[String],
         cwd: &Path,
     ) -> Result<ValidationResult, OrchestratorError> {
-        let output = Command::new(&command[0])
+        let mut process = Command::new(&command[0]);
+        process
             .args(&command[1..])
             .current_dir(cwd)
-            .output()
-            .await?;
+            .kill_on_drop(true)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        process.process_group(0);
+        let output = match process.spawn() {
+            Ok(child) => {
+                #[cfg(unix)]
+                let _group = ValidationProcessGroup(child.id().expect("running child"));
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(self.config.validation_timeout_seconds.into()),
+                    child.wait_with_output(),
+                )
+                .await
+                {
+                    Ok(output) => output,
+                    Err(_) => {
+                        return Ok(ValidationResult {
+                            command: command.to_vec(),
+                            exit_code: -1,
+                            stdout: String::new(),
+                            stderr: format!(
+                                "validation timed out after {} seconds",
+                                self.config.validation_timeout_seconds
+                            ),
+                        });
+                    }
+                }
+            }
+            Err(error) => Err(error),
+        };
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => {
+                return Ok(ValidationResult {
+                    command: command.to_vec(),
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: error.to_string(),
+                });
+            }
+        };
         Ok(ValidationResult {
             command: command.to_vec(),
             exit_code: output.status.code().unwrap_or(-1),
@@ -1235,6 +1484,36 @@ fn find_task<'a>(plan: &'a Plan, task_id: &str) -> Result<&'a Task, Orchestrator
         .iter()
         .find(|task| task.id == task_id)
         .ok_or_else(|| OrchestratorError::Invalid(format!("unknown task: {task_id}")))
+}
+
+fn validate_new_task(task: &Task) -> Result<(), OrchestratorError> {
+    if task.status != TaskStatus::Pending
+        || task.review_attempts != 0
+        || task.branch.is_some()
+        || task.worktree.is_some()
+        || task.base_commit.is_some()
+        || task.commit.is_some()
+    {
+        return Err(OrchestratorError::Invalid(format!(
+            "new task {} must be pending without execution evidence",
+            task.id
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+struct ValidationProcessGroup(u32);
+
+#[cfg(unix)]
+impl Drop for ValidationProcessGroup {
+    fn drop(&mut self) {
+        // SAFETY: the child was started in its own process group; this cleans up only
+        // that validation command and descendants, including after timeout/cancellation.
+        unsafe {
+            libc::kill(-(self.0 as i32), libc::SIGKILL);
+        }
+    }
 }
 
 fn find_task_mut<'a>(plan: &'a mut Plan, task_id: &str) -> Result<&'a mut Task, OrchestratorError> {

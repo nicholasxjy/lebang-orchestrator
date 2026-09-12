@@ -50,6 +50,40 @@ impl Role {
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
     Codex,
+    Claude,
+    OpenCode,
+    Pi,
+    Gemini,
+}
+
+impl AgentKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::OpenCode => "opencode",
+            Self::Pi => "pi",
+            Self::Gemini => "gemini",
+        }
+    }
+
+    pub const fn exit_command(self) -> &'static str {
+        match self {
+            Self::Claude | Self::OpenCode => "/exit",
+            Self::Codex | Self::Pi | Self::Gemini => "/quit",
+        }
+    }
+
+    pub const fn supports_thinking(self, thinking: Thinking) -> bool {
+        use Thinking as T;
+        match self {
+            Self::Codex => !matches!(thinking, T::Off | T::Max),
+            Self::Claude => !matches!(thinking, T::Off | T::Minimal),
+            Self::Pi => true,
+            Self::OpenCode => !matches!(thinking, T::Off | T::Max),
+            Self::Gemini => matches!(thinking, T::Default),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -68,24 +102,31 @@ impl AgentMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Thinking {
+    #[default]
+    Default,
+    Off,
     Minimal,
     Low,
     Medium,
     High,
     Xhigh,
+    Max,
 }
 
 impl Thinking {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Default => "default",
+            Self::Off => "off",
             Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
             Self::Xhigh => "xhigh",
+            Self::Max => "max",
         }
     }
 }
@@ -103,6 +144,7 @@ struct RawAgentConfig {
     agent: AgentKind,
     model: String,
     mode: AgentMode,
+    #[serde(default)]
     thinking: Thinking,
     skill: String,
 }
@@ -124,6 +166,10 @@ pub struct AgentConfig {
 struct RawConfig {
     max_workers: usize,
     max_review_attempts: u32,
+    #[serde(default = "default_timeout_seconds")]
+    agent_timeout_seconds: u32,
+    #[serde(default = "default_timeout_seconds")]
+    validation_timeout_seconds: u32,
     validation_commands: Vec<Vec<String>>,
     herdr: HerdrConfig,
     agents: BTreeMap<String, RawAgentConfig>,
@@ -133,9 +179,15 @@ struct RawConfig {
 pub struct Config {
     pub max_workers: usize,
     pub max_review_attempts: u32,
+    pub agent_timeout_seconds: u32,
+    pub validation_timeout_seconds: u32,
     pub validation_commands: Vec<Vec<String>>,
     pub herdr: HerdrConfig,
     pub agents: BTreeMap<String, AgentConfig>,
+}
+
+fn default_timeout_seconds() -> u32 {
+    3600
 }
 
 impl Config {
@@ -154,6 +206,11 @@ impl Config {
     }
 
     fn from_raw(raw: RawConfig) -> Result<Self, ConfigError> {
+        if raw.agent_timeout_seconds == 0 || raw.validation_timeout_seconds == 0 {
+            return Err(ConfigError::Invalid(
+                "agent_timeout_seconds and validation_timeout_seconds must be at least 1".into(),
+            ));
+        }
         if raw.max_workers == 0 {
             return Err(ConfigError::Invalid(
                 "max_workers must be at least 1".into(),
@@ -193,6 +250,30 @@ impl Config {
                     "agent {identity} model and skill must not be empty"
                 )));
             }
+            if !identity_pattern.is_match(&agent.skill) {
+                return Err(ConfigError::Invalid(format!(
+                    "agent {identity} skill must be a safe skill name"
+                )));
+            }
+            if !agent.agent.supports_thinking(agent.thinking) {
+                return Err(ConfigError::Invalid(format!(
+                    "agent {identity}: thinking {} is not supported by {}",
+                    agent.thinking.as_str(),
+                    agent.agent.as_str()
+                )));
+            }
+            if agent.agent == AgentKind::OpenCode
+                && !agent
+                    .model
+                    .split_once('/')
+                    .is_some_and(|(provider, model)| {
+                        !provider.trim().is_empty() && !model.trim().is_empty()
+                    })
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "agent {identity}: opencode model must use provider/model format"
+                )));
+            }
             agents.insert(
                 identity.clone(),
                 AgentConfig {
@@ -229,6 +310,8 @@ impl Config {
         Ok(Self {
             max_workers: raw.max_workers,
             max_review_attempts: raw.max_review_attempts,
+            agent_timeout_seconds: raw.agent_timeout_seconds,
+            validation_timeout_seconds: raw.validation_timeout_seconds,
             validation_commands: raw.validation_commands,
             herdr: raw.herdr,
             agents,
